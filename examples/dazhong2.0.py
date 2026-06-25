@@ -14,6 +14,7 @@ CAN诊断测试工具 v9.4 - 配置集中版 + 分段写入保护
   六、27服务安全访问（第115行）   - VW安全访问参数
   七、BA安全访问（第130行）       - BA安全访问参数
   八、文件分段写入配置（第145行）  - Excel和Log分段设置
+  九、监听日志开关（第84行）        - 独立监听日志开关
     Excel触发值: TP3E(启动) / STP3E(停止)
 以下代码为通用逻辑，一般无需修改。
 """
@@ -30,6 +31,8 @@ from typing import List, Dict, Optional, Tuple, Union
 
 
 import pandas as pd
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 import can
 import serial
 import binascii
@@ -44,7 +47,7 @@ import subprocess
 # 一、CAN通信配置
 # ────────────────────────────────────────────────
 DEFAULT_CAN_CONFIG = {
-    'bustype': 'bmcan',              # ★ CAN卡类型（bmcan/vector等）
+    'interface': 'bmcan',            # ★ CAN卡类型（bmcan/vector等）
     'channel': 0,                    # ★ 通道号
     'bitrate': 500000,               # ★ 波特率
     'data_bitrate': 2000000,         # ★ FD数据波特率
@@ -76,10 +79,11 @@ LOOP_GAP = 5.0                       # 循环间隔时间（秒）
 # ────────────────────────────────────────────────
 # 三、文件路径配置
 # ────────────────────────────────────────────────
-DLL_PATH = r"D:\python\student\can_send\main\VW_seed_to_key.dll"        # ★ 安全算法DLL路径
-EXCEL_PLAN_PATH = r"D:\python\student\can_send\run_excel\大众\临时bug验证.xlsx"  # ★ Excel配置文件路径
-OUTPUT_DIR = r"D:\python\student\can_send\log"                          # ★ 结果输出目录
-LISTENER_LOG_DIR = r"D:\python\student\can_send\listener"               # ★ 监听日志目录
+DLL_PATH = r"E:\Edownload\input\VW_seed_to_key.dll"        # ★ 安全算法DLL路径
+EXCEL_PLAN_PATH = r"E:\Edownload\input\大众22验证.xlsx"  # ★ Excel配置文件路径
+OUTPUT_DIR = r"E:\Edownload\input\output"                          # ★ 结果输出目录
+LISTENER_LOG_DIR = r"E:\Edownload\ouput"               # ★ 监听日志目录
+ENABLE_LISTENER_LOG = False                       # ★ 是否启用独立监听日志（大多数时候不需要）
 
 # ────────────────────────────────────────────────
 # 四、继电器配置（程控电源控制）
@@ -530,7 +534,7 @@ def channel1_listener_segmented(stop_event: threading.Event, max_size_mb: int = 
     logfile = os.path.join(LISTENER_LOG_DIR, f"can_channel1_{timestamp}_part{file_index}.log")
     
     bus_kwargs = {
-        'bustype': 'bmcan', 'channel': 1, 'bitrate': 500000,
+        'interface': 'bmcan', 'channel': 1, 'bitrate': 500000,
         'is_fd': True, 'data_bitrate': 2000000, 'tres': True,
     }
 
@@ -592,6 +596,9 @@ class CanMessageLogger:
         self.allowed_ids = allowed_ids or set()
         self.current_test_case_id: Optional[str] = None
         self.current_test_name: Optional[str] = None
+        self.current_input_test_case_id: Optional[str] = None
+        self.current_input_test_name: Optional[str] = None
+        self.current_request_data: Optional[str] = None
         self.current_response_frames: List[List[int]] = []
         self.execution_order: List[tuple[str, str]] = []
         self.service28_monitor_logs: List[Dict] = []
@@ -659,14 +666,45 @@ class CanMessageLogger:
     def finalize_and_analyze_response(self, response_id: int = 0x7BE):
         """分析响应，增加对28服务响应（68 xx）的处理"""
         if not self.current_response_frames:
+            # ★ 无任何响应 → 记录超时结果，避免汇总丢失
+            key = (self.current_test_case_id, self.current_test_name)
+            self.test_results[key] = {
+                '请求数据': self.current_request_data or '',
+                '肯定响应值': '',
+                '否定响应值': '',
+                '22服务内容(hex)': '',
+                '22服务内容(ascii)': '',
+                '结果': '失败（超时）',
+                '数据库获取值': '',
+                '期望来源': '',
+                '_input_test_case_id': self.current_input_test_case_id or key[0],
+                '_input_test_name': self.current_input_test_name or key[1],
+            }
+            self.execution_order.append(key)
             return
 
         payload = extract_isotp_payload(self.current_response_frames, response_id=response_id)
         if not payload:
+            # ★ 有帧但无法组装ISOTP → 也记录
+            key = (self.current_test_case_id, self.current_test_name)
+            self.test_results[key] = {
+                '请求数据': self.current_request_data or '',
+                '肯定响应值': '',
+                '否定响应值': '',
+                '22服务内容(hex)': '',
+                '22服务内容(ascii)': '',
+                '结果': '失败（超时）',
+                '数据库获取值': '',
+                '期望来源': '',
+                '_input_test_case_id': self.current_input_test_case_id or key[0],
+                '_input_test_name': self.current_input_test_name or key[1],
+            }
+            self.execution_order.append(key)
             return
 
         key = (self.current_test_case_id, self.current_test_name)
         result_dict = {
+            '请求数据': self.current_request_data or '',
             '肯定响应值': '',
             '否定响应值': '',
             '22服务内容(hex)': '',
@@ -674,6 +712,8 @@ class CanMessageLogger:
             '结果': '未知',
             '数据库获取值': '',
             '期望来源': '',
+            '_input_test_case_id': self.current_input_test_case_id or key[0],
+            '_input_test_name': self.current_input_test_name or key[1],
         }
 
         sid = payload[0] if payload else None
@@ -722,6 +762,10 @@ class CanMessageLogger:
                         break
 
         if not result:
+            return
+
+        # ★ 超时结果保持不变，不再覆盖
+        if '超时' in result.get('结果', ''):
             return
 
         # 获取比对模式（默认精确匹配）
@@ -776,88 +820,262 @@ class CanMessageLogger:
             result['结果'] = '通过' if is_positive else '失败（期望肯定响应）'
             result['期望来源'] = '无期望值（要求肯定响应）'
 
-    # ★★★ 新增：分段保存Excel方法 ★★★
+    # ★★★ 重构：分段保存Excel方法（双Sheet + openpyxl格式化）★★★
     def save_to_excel_segmented(self, base_filename: str) -> str:
-        """
-        分段保存Excel文件
-        - 每达到 max_rows 行数，保存一个分段文件
-        - 最后合并所有分段
-        """
-        max_rows = FILE_SEGMENT_CONFIG.get('excel_max_rows', 1000)
-        
+        max_rows = FILE_SEGMENT_CONFIG.get('excel_max_rows', 4000)
         if not self.messages:
             return base_filename
-
-        # 检查是否需要分段
         total_rows = len(self.messages)
         if total_rows <= max_rows or not FILE_SEGMENT_CONFIG.get('enable_segment_write', True):
-            # 数据量小，直接保存
             self._save_single_excel(base_filename)
             return base_filename
-
-        # 分段保存
         segment_count = (total_rows // max_rows) + 1
         base_name = os.path.splitext(base_filename)[0]
-        
         print(f"  数据共 {total_rows} 行，将保存为 {segment_count} 个分段文件")
-
         for seg_idx in range(segment_count):
             start_idx = seg_idx * max_rows
             end_idx = min((seg_idx + 1) * max_rows, total_rows)
             segment_data = self.messages[start_idx:end_idx]
-
             segment_file = f"{base_name}_part{seg_idx + 1}.xlsx"
-            self._save_segment_excel(segment_file, segment_data, start_idx)
+            self._save_segment_excel(segment_file, segment_data)
             self.segment_files.append(segment_file)
             print(f"  ✓ 分段 {seg_idx + 1}/{segment_count} 已保存: {segment_file}")
-
-        # 合并所有分段到最终文件
         self._merge_segment_files(base_filename)
         return base_filename
 
-    def _save_segment_excel(self, filename: str, messages: List[Dict], offset: int):
-        """保存单个分段Excel"""
-        df = pd.DataFrame(messages)
-        df['测试用例ID'] = df['测试用例ID'].astype(str)
-        df['测试项'] = df['测试项'].astype(str)
-        
-        # 添加结果列
-        result_map = {(tid, tname): res for (tid, tname), res in self.test_results.items()}
-        for col in ['结果', '肯定响应值', '否定响应值', '22服务内容(hex)',
-                    '22服务内容(ascii)', '数据库获取值', '期望来源']:
-            df[col] = ''
-        
-        for idx, row in df.iterrows():
-            key = (row['测试用例ID'], row['测试项'])
-            if key in result_map:
-                res = result_map[key]
-                for col in res:
-                    df.at[idx, col] = res[col]
+    # ── 通用样式 ──
+    @staticmethod
+    def _excel_styles():
+        """返回常用样式字典，避免重复创建"""
+        thin = Side(style='thin')
+        return {
+            'header_font': Font(name='微软雅黑', bold=True, size=11, color='FFFFFF'),
+            'header_fill': PatternFill(start_color='4472C4', end_color='4472C4', fill_type='solid'),
+            'header_align': Alignment(horizontal='center', vertical='center', wrap_text=True),
+            'cell_align': Alignment(horizontal='center', vertical='center'),
+            'cell_align_left': Alignment(horizontal='left', vertical='center'),
+            'border': Border(left=thin, right=thin, top=thin, bottom=thin),
+            'pass_fill': PatternFill(start_color='C6EFCE', end_color='C6EFCE', fill_type='solid'),
+            'fail_fill': PatternFill(start_color='FFC7CE', end_color='FFC7CE', fill_type='solid'),
+            'neg_fill': PatternFill(start_color='FFEB9C', end_color='FFEB9C', fill_type='solid'),
+            'pass_font': Font(name='微软雅黑', size=10, color='006100'),
+            'fail_font': Font(name='微软雅黑', size=10, color='9C0006'),
+            'neg_font': Font(name='微软雅黑', size=10, color='9C6500'),
+            'data_font': Font(name='微软雅黑', size=10),
+            'section_fill': PatternFill(start_color='D9E2F3', end_color='D9E2F3', fill_type='solid'),
+            'section_font': Font(name='微软雅黑', bold=True, size=11, color='1F4E79'),
+        }
 
-        columns_order = [
-            '时间', '类型', 'CAN ID (十六进制)', '扩展帧', '数据长度',
-            '数据 (十六进制)', '数据 (ASCII)', '测试用例ID', '测试项',
-            '结果', '肯定响应值', '否定响应值', '22服务内容(hex)',
-            '22服务内容(ascii)', '数据库获取值', '期望来源'
+    def _build_summary_sheet(self, ws):
+        """构建【测试汇总】Sheet"""
+        S = self._excel_styles()
+        summary_cols = [
+            ('序号', 6), ('轮次', 6), ('测试用例ID', 16), ('测试项', 36),
+            ('请求数据', 20), ('结果', 10), ('肯定响应值', 22), ('否定响应值', 18),
+            ('响应内容(HEX)', 30), ('响应内容(ASCII)', 24), ('数据库获取值', 18), ('期望来源', 36),
         ]
-        existing_cols = [col for col in columns_order if col in df.columns]
-        df = df[existing_cols]
+        # 写表头
+        for ci, (cn, _) in enumerate(summary_cols, 1):
+            c = ws.cell(row=1, column=ci, value=cn)
+            c.font = S['header_font']; c.fill = S['header_fill']
+            c.alignment = S['header_align']; c.border = S['border']
 
-        os.makedirs(os.path.dirname(filename), exist_ok=True)
-        
-        # ★★★ 使用 with 块确保文件关闭 ★★★
-        with pd.ExcelWriter(filename, engine='openpyxl') as writer:
-            df.to_excel(writer, sheet_name=f'结果{offset//FILE_SEGMENT_CONFIG["excel_max_rows"]+1}', index=False)
-            
-            if self.service28_monitor_logs:
-                df_monitor = pd.DataFrame(self.service28_monitor_logs)
-                df_monitor.to_excel(writer, sheet_name='28服务监控', index=False)
-
-    def _merge_segment_files(self, final_filename: str):
-        """合并所有分段文件"""
-        if not self.segment_files:
+        result_map = self.test_results
+        order = self.execution_order
+        if not order:
             return
 
+        # 统计
+        pass_count = fail_count = neg_count = 0
+        row_num = 2
+        for seq, key in enumerate(order, 1):
+            res = result_map.get(key, {})
+            status = str(res.get('结果', ''))
+            if '通过' in status: pass_count += 1
+            elif '失败' in status: fail_count += 1
+            elif '否定' in status: neg_count += 1
+
+            values = [
+                seq,
+                res.get('轮次', ''),
+                res.get('_input_test_case_id', key[0]),
+                res.get('_input_test_name', key[1]),
+                res.get('请求数据', ''),
+                status,
+                res.get('肯定响应值', ''),
+                res.get('否定响应值', ''),
+                res.get('22服务内容(hex)', ''),
+                res.get('22服务内容(ascii)', ''),
+                res.get('数据库获取值', ''),
+                res.get('期望来源', ''),
+            ]
+            for ci, v in enumerate(values, 1):
+                c = ws.cell(row=row_num, column=ci, value=v if v is not None else '')
+                c.font = S['data_font']; c.border = S['border']
+                c.alignment = S['cell_align_left'] if ci in (4, 9, 10, 12) else S['cell_align']
+
+            # 结果列着色
+            result_cell = ws.cell(row=row_num, column=6)
+            if '通过' in status:
+                result_cell.fill = S['pass_fill']; result_cell.font = S['pass_font']
+            elif '失败' in status:
+                result_cell.fill = S['fail_fill']; result_cell.font = S['fail_font']
+            elif '否定' in status:
+                result_cell.fill = S['neg_fill']; result_cell.font = S['neg_font']
+
+            row_num += 1
+
+        # 列宽
+        for ci, (_, w) in enumerate(summary_cols, 1):
+            ws.column_dimensions[ws.cell(row=1, column=ci).column_letter].width = w
+        ws.freeze_panes = 'A2'
+        ws.auto_filter.ref = ws.dimensions
+        return pass_count, fail_count, neg_count
+
+    def _build_detail_sheet(self, ws):
+        """构建【报文详情】Sheet"""
+        S = self._excel_styles()
+        detail_cols = [
+            ('序号', 6), ('时间', 22), ('Tx/Rx', 6), ('CAN ID', 12),
+            ('扩展帧', 8), ('DLC', 6), ('数据(HEX)', 48), ('数据(ASCII)', 30),
+            ('所属用例ID', 16), ('所属测试项', 36),
+        ]
+        for ci, (cn, _) in enumerate(detail_cols, 1):
+            c = ws.cell(row=1, column=ci, value=cn)
+            c.font = S['header_font']; c.fill = S['header_fill']
+            c.alignment = S['header_align']; c.border = S['border']
+
+        for seq, msg in enumerate(self.messages, 1):
+            msg_type = msg.get('类型', '')
+            values = [
+                seq,
+                msg.get('时间', ''),
+                msg_type,
+                msg.get('CAN ID (十六进制)', ''),
+                msg.get('扩展帧', ''),
+                msg.get('数据长度', ''),
+                msg.get('数据 (十六进制)', ''),
+                msg.get('数据 (ASCII)', ''),
+                msg.get('测试用例ID', ''),
+                msg.get('测试项', ''),
+            ]
+            for ci, v in enumerate(values, 1):
+                c = ws.cell(row=seq + 1, column=ci, value=v if v is not None else '')
+                c.font = S['data_font']; c.border = S['border']
+                c.alignment = S['cell_align_left'] if ci in (7, 8, 10) else S['cell_align']
+
+            # Tx/Rx 着色
+            type_cell = ws.cell(row=seq + 1, column=3)
+            if msg_type == '发送':
+                type_cell.fill = PatternFill(start_color='DAEEF3', end_color='DAEEF3', fill_type='solid')
+            elif msg_type == '接收':
+                type_cell.fill = PatternFill(start_color='E2EFDA', end_color='E2EFDA', fill_type='solid')
+
+        for ci, (_, w) in enumerate(detail_cols, 1):
+            ws.column_dimensions[ws.cell(row=1, column=ci).column_letter].width = w
+        ws.freeze_panes = 'A2'
+        ws.auto_filter.ref = ws.dimensions
+
+    def _build_monitor_sheet(self, ws):
+        """构建【28服务监控】Sheet"""
+        if not self.service28_monitor_logs:
+            return
+        S = self._excel_styles()
+        mon_cols = [
+            ('序号', 6), ('时间', 22), ('测试用例ID', 16), ('测试项', 36),
+            ('监控目标ID', 14), ('实际CAN ID', 14), ('DLC', 6),
+            ('数据(HEX)', 48), ('数据(ASCII)', 30),
+        ]
+        for ci, (cn, _) in enumerate(mon_cols, 1):
+            c = ws.cell(row=1, column=ci, value=cn)
+            c.font = S['header_font']; c.fill = S['header_fill']
+            c.alignment = S['header_align']; c.border = S['border']
+        for seq, log in enumerate(self.service28_monitor_logs, 1):
+            values = [
+                seq,
+                log.get('时间', ''),
+                log.get('测试用例ID', ''),
+                log.get('测试项', ''),
+                log.get('监控目标ID', ''),
+                log.get('实际CAN ID', ''),
+                log.get('数据长度', ''),
+                log.get('数据 (十六进制)', ''),
+                log.get('数据 (ASCII)', ''),
+            ]
+            for ci, v in enumerate(values, 1):
+                c = ws.cell(row=seq + 1, column=ci, value=v if v is not None else '')
+                c.font = S['data_font']; c.border = S['border']
+                c.alignment = S['cell_align_left'] if ci in (8, 9) else S['cell_align']
+        for ci, (_, w) in enumerate(mon_cols, 1):
+            ws.column_dimensions[ws.cell(row=1, column=ci).column_letter].width = w
+        ws.freeze_panes = 'A2'
+        ws.auto_filter.ref = ws.dimensions
+
+    def _save_single_excel(self, filename: str):
+        """保存单文件 Excel（双Sheet: 测试汇总 + 报文详情 + 28服务监控）"""
+        if not self.messages:
+            return
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
+        wb = Workbook()
+        # Sheet1: 测试汇总
+        ws_summary = wb.active
+        ws_summary.title = '测试汇总'
+        pass_c, fail_c, neg_c = self._build_summary_sheet(ws_summary)
+        # Sheet2: 报文详情
+        ws_detail = wb.create_sheet('报文详情')
+        self._build_detail_sheet(ws_detail)
+        # Sheet3: 28服务监控
+        if self.service28_monitor_logs:
+            ws_mon = wb.create_sheet('28服务监控')
+            self._build_monitor_sheet(ws_mon)
+        wb.save(filename)
+        total = pass_c + fail_c + neg_c if isinstance(pass_c, int) else 0
+        print(f"  ✓ 汇总: {total} 条 | 通过 {pass_c} | 失败 {fail_c} | 否定响应 {neg_c}")
+
+    def _save_segment_excel(self, filename: str, messages: List[Dict]):
+        """保存单个分段Excel（暂存报文详情，合并时统一处理）"""
+        if not messages:
+            return
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
+        W = self._excel_styles()
+        wb = Workbook()
+        ws = wb.active; ws.title = '报文详情'
+        detail_cols = [
+            ('序号', 6), ('时间', 22), ('Tx/Rx', 6), ('CAN ID', 12),
+            ('扩展帧', 8), ('DLC', 6), ('数据(HEX)', 48), ('数据(ASCII)', 30),
+            ('所属用例ID', 16), ('所属测试项', 36),
+        ]
+        for ci, (cn, _) in enumerate(detail_cols, 1):
+            c = ws.cell(row=1, column=ci, value=cn)
+            c.font = W['header_font']; c.fill = W['header_fill']
+            c.alignment = W['header_align']; c.border = W['border']
+        for seq, msg in enumerate(messages, 1):
+            msg_type = msg.get('类型', '')
+            values = [
+                seq, msg.get('时间', ''), msg_type,
+                msg.get('CAN ID (十六进制)', ''), msg.get('扩展帧', ''),
+                msg.get('数据长度', ''), msg.get('数据 (十六进制)', ''),
+                msg.get('数据 (ASCII)', ''), msg.get('测试用例ID', ''),
+                msg.get('测试项', ''),
+            ]
+            for ci, v in enumerate(values, 1):
+                c = ws.cell(row=seq + 1, column=ci, value=v if v is not None else '')
+                c.font = W['data_font']; c.border = W['border']
+                c.alignment = W['cell_align_left'] if ci in (7, 8, 10) else W['cell_align']
+            tc = ws.cell(row=seq + 1, column=3)
+            if msg_type == '发送':
+                tc.fill = PatternFill(start_color='DAEEF3', end_color='DAEEF3', fill_type='solid')
+            elif msg_type == '接收':
+                tc.fill = PatternFill(start_color='E2EFDA', end_color='E2EFDA', fill_type='solid')
+        for ci, (_, w) in enumerate(detail_cols, 1):
+            ws.column_dimensions[ws.cell(row=1, column=ci).column_letter].width = w
+        ws.freeze_panes = 'A2'
+        wb.save(filename)
+
+    def _merge_segment_files(self, final_filename: str):
+        """合并分段文件 → 最终双Sheet输出"""
+        if not self.segment_files:
+            return
         all_data = []
         for seg_file in self.segment_files:
             try:
@@ -865,60 +1083,84 @@ class CanMessageLogger:
                 all_data.append(df)
             except Exception as e:
                 print(f"  ⚠ 读取分段文件失败: {seg_file}, {e}")
-
-        if all_data:
-            merged_df = pd.concat(all_data, ignore_index=True)
-            
-            with pd.ExcelWriter(final_filename, engine='openpyxl') as writer:
-                merged_df.to_excel(writer, sheet_name='测试结果', index=False)
-                
-                if self.service28_monitor_logs:
-                    df_monitor = pd.DataFrame(self.service28_monitor_logs)
-                    df_monitor.to_excel(writer, sheet_name='28服务监控', index=False)
-
-            print(f"  ✓ 合并完成: {final_filename}")
-
-            # 清理分段文件
-            for seg_file in self.segment_files:
-                try:
-                    os.remove(seg_file)
-                except:
-                    pass
-            self.segment_files.clear()
-
-    def _save_single_excel(self, filename: str):
-        """保存单个Excel文件（不分段）"""
-        if not self.messages:
+        if not all_data:
             return
-        df = pd.DataFrame(self.messages)
-        df['测试用例ID'] = df['测试用例ID'].astype(str)
-        df['测试项'] = df['测试项'].astype(str)
-        result_map = {(tid, tname): res for (tid, tname), res in self.test_results.items()}
-        for col in ['结果', '肯定响应值', '否定响应值', '22服务内容(hex)',
-                    '22服务内容(ascii)', '数据库获取值', '期望来源']:
-            df[col] = ''
-        for idx, row in df.iterrows():
-            key = (row['测试用例ID'], row['测试项'])
-            if key in result_map:
-                res = result_map[key]
-                for col in res:
-                    df.at[idx, col] = res[col]
-        columns_order = [
-            '时间', '类型', 'CAN ID (十六进制)', '扩展帧', '数据长度',
-            '数据 (十六进制)', '数据 (ASCII)', '测试用例ID', '测试项',
-            '结果', '肯定响应值', '否定响应值', '22服务内容(hex)',
-            '22服务内容(ascii)', '数据库获取值', '期望来源'
-        ]
-        existing_cols = [col for col in columns_order if col in df.columns]
-        df = df[existing_cols]
-        os.makedirs(os.path.dirname(filename), exist_ok=True)
-        with pd.ExcelWriter(filename, engine='openpyxl') as writer:
-            df.to_excel(writer, sheet_name='测试结果', index=False)
 
-            # ★ 新增：28服务监控日志 Sheet
-            if self.service28_monitor_logs:
-                df_monitor = pd.DataFrame(self.service28_monitor_logs)
-                df_monitor.to_excel(writer, sheet_name='28服务监控', index=False)
+        os.makedirs(os.path.dirname(final_filename), exist_ok=True)
+        wb = Workbook()
+
+        # Sheet1: 测试汇总
+        ws_summary = wb.active
+        ws_summary.title = '测试汇总'
+        pass_c, fail_c, neg_c = self._build_summary_sheet(ws_summary)
+
+        # Sheet2: 合并后的报文详情
+        ws_detail = wb.create_sheet('报文详情')
+        merged = pd.concat(all_data, ignore_index=True)
+        self._build_detail_sheet_from_df(ws_detail, merged)
+
+        # Sheet3: 28服务监控
+        if self.service28_monitor_logs:
+            ws_mon = wb.create_sheet('28服务监控')
+            self._build_monitor_sheet(ws_mon)
+
+        wb.save(final_filename)
+        total = pass_c + fail_c + neg_c if isinstance(pass_c, int) else 0
+        print(f"  ✓ 合并完成: {final_filename}")
+        print(f"  ✓ 汇总: {total} 条 | 通过 {pass_c} | 失败 {fail_c} | 否定响应 {neg_c}")
+
+        for seg_file in self.segment_files:
+            try: os.remove(seg_file)
+            except: pass
+        self.segment_files.clear()
+
+    def _build_detail_sheet_from_df(self, ws, df: 'pd.DataFrame'):
+        """从合并后的 DataFrame 构建报文详情 Sheet"""
+        S = self._excel_styles()
+        detail_cols = [
+            ('序号', 6), ('时间', 22), ('Tx/Rx', 6), ('CAN ID', 12),
+            ('扩展帧', 8), ('DLC', 6), ('数据(HEX)', 48), ('数据(ASCII)', 30),
+            ('所属用例ID', 16), ('所属测试项', 36),
+        ]
+        for ci, (cn, _) in enumerate(detail_cols, 1):
+            c = ws.cell(row=1, column=ci, value=cn)
+            c.font = S['header_font']; c.fill = S['header_fill']
+            c.alignment = S['header_align']; c.border = S['border']
+
+        col_map = {
+            '时间': '时间', '类型': 'Tx/Rx', 'CAN ID (十六进制)': 'CAN ID',
+            '扩展帧': '扩展帧', '数据长度': 'DLC', '数据 (十六进制)': '数据(HEX)',
+            '数据 (ASCII)': '数据(ASCII)', '测试用例ID': '所属用例ID', '测试项': '所属测试项',
+        }
+        for seq_idx, (_, row) in enumerate(df.iterrows()):
+            seq = seq_idx + 1
+            msg_type = str(row.get('类型', ''))
+            values = [
+                seq,
+                str(row.get('时间', '')),
+                msg_type,
+                str(row.get('CAN ID (十六进制)', '')),
+                str(row.get('扩展帧', '')),
+                row.get('数据长度', ''),
+                str(row.get('数据 (十六进制)', '')),
+                str(row.get('数据 (ASCII)', '')),
+                str(row.get('测试用例ID', '')),
+                str(row.get('测试项', '')),
+            ]
+            for ci, v in enumerate(values, 1):
+                c = ws.cell(row=seq + 1, column=ci, value=v if v is not None else '')
+                c.font = S['data_font']; c.border = S['border']
+                c.alignment = S['cell_align_left'] if ci in (7, 8, 10) else S['cell_align']
+            tc = ws.cell(row=seq + 1, column=3)
+            if msg_type == '发送':
+                tc.fill = PatternFill(start_color='DAEEF3', end_color='DAEEF3', fill_type='solid')
+            elif msg_type == '接收':
+                tc.fill = PatternFill(start_color='E2EFDA', end_color='E2EFDA', fill_type='solid')
+
+        for ci, (_, w) in enumerate(detail_cols, 1):
+            ws.column_dimensions[ws.cell(row=1, column=ci).column_letter].width = w
+        ws.freeze_panes = 'A2'
+        ws.auto_filter.ref = ws.dimensions
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1137,6 +1379,7 @@ class Service28Handler(UDSServiceHandler):
 
         key = (cfg['test_case_id'], cfg['test_name'])
         logger.test_results[key] = {
+            '请求数据': cfg.get('request_data_str', ''),
             '肯定响应值': response_detail if is_positive else '',
             '否定响应值': response_detail if is_negative else '',
             '22服务内容(hex)': '',
@@ -1175,8 +1418,6 @@ class Service27Handler(UDSServiceHandler):
         logger.current_test_case_id = test_id
         logger.current_test_name = test_name
 
-        print(f"\n  [安全访问] 开始执行...")
-
         seed = None
         key = None
         response_str = ""
@@ -1188,7 +1429,6 @@ class Service27Handler(UDSServiceHandler):
         session_sub = int(session_req[2:4], 16)  # 03 或 02
 
         # ═══ 步骤0：切换会话 ═══
-        print(f"  [27服务] 发送 {session_req}")
         self._send(bus, arb_id, [0x02, int(session_req[:2], 16), int(session_req[2:4], 16)], logger)
         time.sleep(0.2)
 
@@ -1198,7 +1438,6 @@ class Service27Handler(UDSServiceHandler):
 
             # ═══ 步骤1：请求种子 ═══
             seed_req = svc_cfg['seed_request']  # 如 "2701" 或 "2705"
-            print(f"  [27服务] 发送 {seed_req}")
             self._send(bus, arb_id, [0x02, int(seed_req[:2], 16), int(seed_req[2:4], 16)], logger)
             time.sleep(0.2)
 
@@ -1208,15 +1447,12 @@ class Service27Handler(UDSServiceHandler):
                                    svc_cfg['seed_expected_sub'])
 
             if seed:
-                print(f"  [27服务] 收到种子: {seed.hex().upper()}")
 
                 # ═══ 步骤3：计算密钥 ═══
                 key = VW_Seed2Key(seed)
-                print(f"  [27服务] 计算密钥: {key.hex().upper()}")
 
                 # ═══ 步骤4：发送密钥 ═══
                 key_req = svc_cfg['key_request']  # 如 "2702" 或 "2706"
-                print(f"  [27服务] 发送 {key_req} {key.hex().upper()}")
                 self._send(bus, arb_id, [0x06, int(key_req[:2], 16), int(key_req[2:4], 16)] + list(key) + [0xCC], logger)
                 time.sleep(0.2)
 
@@ -1238,15 +1474,16 @@ class Service27Handler(UDSServiceHandler):
             detail += f" 密钥:{key.hex().upper()}"
 
         logger.test_results[result_key] = {
+            '请求数据': cfg.get('request_data_str', ''),
             '肯定响应值': response_str if success else '',
             '否定响应值': response_str if not success else '',
             '22服务内容(hex)': detail,
             '结果': '通过' if success else '失败',
-            '期望来源': f'期望 {svc_cfg["key_expected_sid"]:02X} {svc_cfg["key_expected_sub"]:02X}（安全访问成功）'
+            '期望来源': f'期望 {svc_cfg["key_expected_sid"]:02X} {svc_cfg["key_expected_sub"]:02X}（安全访问成功）',
+            '_input_test_case_id': cfg.get('_input_test_case_id', test_id),
+            '_input_test_name': cfg.get('_input_test_name', str(test_name)),
         }
         logger.execution_order.append(result_key)
-
-        print(f"  [安全访问] {'✓ 成功' if success else '✗ 失败'}")
 
     def _send(self, bus, arb_id: int, data: list, logger):
         """发送单帧"""
@@ -1325,8 +1562,6 @@ class ServiceBA27Handler(UDSServiceHandler):
         logger.current_test_case_id = test_id
         logger.current_test_name = test_name
 
-        print(f"\n  [BA安全访问] 开始执行...")
-
         seed = None
         key = None
         response_str = ""
@@ -1338,7 +1573,6 @@ class ServiceBA27Handler(UDSServiceHandler):
         seed_sub = int(seed_req[2:4], 16)  # 01
 
         # ═══ 步骤1：请求种子 ═══
-        print(f"  [BA服务] 发送 {seed_req}")
         self._send(bus, arb_id, [0x02, seed_sid, seed_sub], logger)
         time.sleep(0.2)
 
@@ -1348,17 +1582,14 @@ class ServiceBA27Handler(UDSServiceHandler):
                                SERVICE_BA27_CONFIG['seed_expected_sub'])
 
         if seed:
-            print(f"  [BA服务] 收到种子: {seed.hex().upper()}")
 
             # ═══ 步骤3：计算密钥 ═══
             key_bytes = calculate_key_level1(list(seed))
             if key_bytes:
                 key = bytes(key_bytes)
-                print(f"  [BA服务] 计算密钥: {key.hex().upper()}")
 
                 # ═══ 步骤4：发送密钥 ═══
                 key_req = SERVICE_BA27_CONFIG['key_request']  # 如 "BA02"
-                print(f"  [BA服务] 发送 {key_req} {key.hex().upper()}")
                 self._send(bus, arb_id, [0x06, int(key_req[:2], 16), int(key_req[2:4], 16)] + key_bytes, logger)
                 time.sleep(0.2)
 
@@ -1378,15 +1609,17 @@ class ServiceBA27Handler(UDSServiceHandler):
             detail += f" 密钥:{key.hex().upper()}"
 
         logger.test_results[result_key] = {
+            '请求数据': cfg.get('request_data_str', ''),
             '肯定响应值': response_str if success else '',
             '否定响应值': response_str if not success else '',
             '22服务内容(hex)': detail,
             '结果': '通过' if success else '失败',
-            '期望来源': 'BA安全访问成功'
+            '期望来源': 'BA安全访问成功',
+            '_input_test_case_id': cfg.get('_input_test_case_id', test_id),
+            '_input_test_name': cfg.get('_input_test_name', str(test_name)),
         }
         logger.execution_order.append(result_key)
 
-        print(f"  [BA安全访问] {'✓ 成功' if success else '✗ 失败'}")
         time.sleep(0.5)
 
     def _send(self, bus, arb_id: int, data: list, logger):
@@ -1479,7 +1712,6 @@ class TesterPresentHandler(UDSServiceHandler):
             # 构造临时 cfg，复用基类 send 发送 3E 00
             
             fake_cfg = {'request_data_str': '3E 00'}
-            print(fake_cfg)
             self.send(bus, config.get('tp3e_arb_id', 0x711), fake_cfg, logger)
 
             # ★★★ 等待并获取 7E00 响应（只接收 security_response_id 的帧）★★★
@@ -1492,12 +1724,11 @@ class TesterPresentHandler(UDSServiceHandler):
                     response = msg
                     break
             if response:
-                print(f"[3E00] 接收 {response}")
                 logger.log_received_message(response, time.time())
 
             time.sleep(config.get('tp3e_wait_after', 0.1))
-        except Exception as e:
-            print(f"[3E00] 发送失败: {e}")
+        except Exception:
+            pass
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1549,7 +1780,13 @@ def load_send_configs_from_excel(path: str) -> List[Dict]:
     configs = []
 
     for idx, row in df.iterrows():
-        if idx == 0 or row.isna().all():
+        if row.isna().all():
+            continue
+
+        # ★ 测试用例ID必填校验
+        tc_id_val = row.get('测试用例ID')
+        if pd.isna(tc_id_val) or str(tc_id_val).strip() == '':
+            print(f"  ⚠ 第{idx+1}行（Excel行号）缺少测试用例ID，已跳过")
             continue
 
         enable_str = str(row.get('是否启用', '')).strip().lower()
@@ -1559,8 +1796,11 @@ def load_send_configs_from_excel(path: str) -> List[Dict]:
             continue
 
         cfg: Dict = {}
-        cfg['test_case_id'] = str(row.get('测试用例ID', f"case_{idx}"))
+        cfg['test_case_id'] = str(tc_id_val).strip()
         cfg['test_name'] = row.get('测试项', f"测试项{idx}")
+        # ★ 保存原始输入值（展开前），用于输出时保持与输入一致
+        cfg['_input_test_case_id'] = cfg['test_case_id']
+        cfg['_input_test_name'] = str(cfg['test_name'])
 
         can_id_val = row.get('CANID')
         if pd.isna(can_id_val):
@@ -1575,7 +1815,6 @@ def load_send_configs_from_excel(path: str) -> List[Dict]:
         cfg['expected_hex_str'] = str(row.get('期望HEX', '')) if pd.notna(row.get('期望HEX')) else None
         cfg['response_timeout'] = float(row.get('响应超时时间', DEFAULT_CAN_CONFIG['response_timeout']))
         cfg['wait_after_request'] = float(row.get('等待间隔时间', DEFAULT_CAN_CONFIG['wait_after_request']))
-        print(cfg['request_data_str'] ,cfg['wait_after_request'] )
 
         periodic_str = str(row.get('是否周期发送', '')).strip().lower()
         if periodic_str in ['是', 'true', '1', 'yes', '启用', 'start', '开启']:
@@ -1672,11 +1911,17 @@ _global_logger: Optional[CanMessageLogger] = None
 _global_listener_thread: Optional[threading.Thread] = None
 _global_listener_stop: Optional[threading.Event] = None
 _global_output_dir: str = OUTPUT_DIR
+_global_saved: bool = False  # ★ 标记是否已正常保存，避免atexit重复保存
 
 def emergency_save(signum=None, frame=None):
     """
     紧急保存函数：在异常退出时保存已收集的数据
     """
+    global _global_saved
+    if _global_saved:
+        return
+    _global_saved = True
+
     print("\n⚠ 检测到异常退出信号，正在紧急保存数据...")
 
     if _global_logger is not None:
@@ -1729,7 +1974,7 @@ def send_and_receive_can_messages(send_configs: List[Dict],
     try:
         relay_ser = init_serial()
         bus_kwargs = {
-            'bustype': config['bustype'],
+            'interface': config['interface'],
             'channel': config['channel'],
             'bitrate': config['bitrate'],
             'tres': config.get('tres', True),
@@ -1740,27 +1985,31 @@ def send_and_receive_can_messages(send_configs: List[Dict],
         bus = can.interface.Bus(**bus_kwargs)
         
         # ★★★ 启动分段写入的监听线程 ★★★
-        listener_thread = threading.Thread(
-            target=channel1_listener_segmented,
-            args=(listener_stop, FILE_SEGMENT_CONFIG['log_max_size_mb']),
-            daemon=True
-        )
-        listener_thread.start()
+        if ENABLE_LISTENER_LOG:
+            listener_thread = threading.Thread(
+                target=channel1_listener_segmented,
+                args=(listener_stop, FILE_SEGMENT_CONFIG['log_max_size_mb']),
+                daemon=True
+            )
+            listener_thread.start()
         
         # ★★★ 设置全局变量用于紧急保存 ★★★
         global _global_logger, _global_listener_thread, _global_listener_stop
         _global_logger = can_logger
-        _global_listener_thread = listener_thread
-        _global_listener_stop = listener_stop
+        if ENABLE_LISTENER_LOG:
+            _global_listener_thread = listener_thread
+            _global_listener_stop = listener_stop
 
         # ★★★ 创建 TP3E Handler 单例 ★★★
         tp3e_handler = TesterPresentHandler(config)
 
         total = len(send_configs)
         for idx, cfg in enumerate(send_configs, 1):
-            print(f"[{idx}/{total}] {cfg['test_name']} (ID: {cfg['test_case_id']})")
             can_logger.current_test_case_id = cfg['test_case_id']
             can_logger.current_test_name = cfg['test_name']
+            can_logger.current_input_test_case_id = cfg.get('_input_test_case_id', cfg['test_case_id'])
+            can_logger.current_input_test_name = cfg.get('_input_test_name', str(cfg['test_name']))
+            can_logger.current_request_data = cfg['request_data_str']
             arb_id = cfg['arbitration_id']
             handler = get_handler(cfg, config)
 
@@ -1822,11 +2071,18 @@ def send_and_receive_can_messages(send_configs: List[Dict],
 
             # ★★★ 统一分片等待：每0.5s检查一次是否到点发3E00 ★★★
             _w = cfg['wait_after_request']
-            print(_w)
             while _w > 0:
                 time.sleep(min(0.5, _w))
                 _w -= 0.5
                 tp3e_handler.check_and_send(bus, can_logger)
+
+            # ★★★ 输出本条用例执行结果 ★★★
+            _result_key = (cfg['test_case_id'], cfg['test_name'])
+            _res = can_logger.test_results.get(_result_key, {})
+            _status = _res.get('结果', '未记录')
+            _in_id = cfg.get('_input_test_case_id', cfg['test_case_id'])
+            _resp = _res.get('肯定响应值', '') or _res.get('否定响应值', '')
+            print(f"[{idx}/{total}] ID:{_in_id}  ->  {_status}  {_resp}")
     except Exception as e:
         print(f"发生错误：{e}")
         import traceback
@@ -1859,8 +2115,7 @@ def main():
         return
 
     total_rounds = max(1, LOOP_COUNT)
-    print(f"共加载 {len(configs)} 条测试用例（展开后）")
-    print(f"共执行 {total_rounds} 轮\n")
+    print(f"共加载 {len(configs)} 条测试用例（展开后），共执行 {total_rounds} 轮\n")
 
     # ★ 一个 logger 跑所有轮次
     can_logger = CanMessageLogger(DEFAULT_CAN_CONFIG['allowed_ids'])
@@ -1877,14 +2132,24 @@ def main():
         send_and_receive_can_messages(round_configs, round_num=round_num, logger=can_logger)
 
         if round_num < total_rounds:
-            print(f"\n  等待 {LOOP_GAP}s 后开始下一轮...")
             time.sleep(LOOP_GAP)
 
     # ★ 所有轮次跑完，统一保存
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     excel_file = os.path.join(OUTPUT_DIR, f"CAN测试结果_{timestamp}.xlsx")
     can_logger.save_to_excel_segmented(excel_file)
-    print(f"\n全部 {total_rounds} 轮执行完毕，结果已保存到：{excel_file}")
+    global _global_saved
+    _global_saved = True  # ★ 标记已正常保存，防止atexit重复触发
+
+    # ★★★ 终端汇总输出 ★★★
+    total = len(can_logger.execution_order)
+    pass_c = sum(1 for k in can_logger.execution_order if '通过' in can_logger.test_results.get(k, {}).get('结果', ''))
+    fail_c = sum(1 for k in can_logger.execution_order if '失败' in can_logger.test_results.get(k, {}).get('结果', ''))
+    neg_c = sum(1 for k in can_logger.execution_order if '否定' in can_logger.test_results.get(k, {}).get('结果', ''))
+    print(f"\n{'='*60}")
+    print(f"  执行完毕  共 {total} 条 | 通过 {pass_c} | 失败 {fail_c} | 否定响应 {neg_c}")
+    print(f"{'='*60}")
+    print(f"  结果已保存：{excel_file}")
 
 
 if __name__ == "__main__":

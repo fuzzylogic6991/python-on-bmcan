@@ -8,7 +8,7 @@ import pathlib
 from time import time, sleep
 import typing
 
-from pkg_resources import iter_entry_points
+from importlib.metadata import entry_points
 
 from .generic import MessageReader
 from .asc import ASCReader
@@ -70,10 +70,14 @@ class LogReader(MessageReader):
         :raises ValueError: if the filename's suffix is of an unknown file type
         """
         if not LogReader.fetched_plugins:
+            try:
+                entries = entry_points(group="can.io.message_reader")
+            except TypeError:
+                entries = entry_points().get("can.io.message_reader", [])
             LogReader.message_readers.update(
                 {
                     reader.name: reader.load()
-                    for reader in iter_entry_points("can.io.message_reader")
+                    for reader in entries
                 }
             )
             LogReader.fetched_plugins = True

@@ -12,7 +12,7 @@ from typing import Any, Optional, Callable, Type, Tuple, cast, Dict
 from types import TracebackType
 
 from typing_extensions import Literal
-from pkg_resources import iter_entry_points
+from importlib.metadata import entry_points
 
 from ..message import Message
 from ..listener import Listener
@@ -75,10 +75,14 @@ class Logger(MessageWriter):  # pylint: disable=abstract-method
             return Printer(*args, **kwargs)
 
         if not Logger.fetched_plugins:
+            try:
+                entries = entry_points(group="can.io.message_writer")
+            except TypeError:
+                entries = entry_points().get("can.io.message_writer", [])
             Logger.message_writers.update(
                 {
                     writer.name: writer.load()
-                    for writer in iter_entry_points("can.io.message_writer")
+                    for writer in entries
                 }
             )
             Logger.fetched_plugins = True

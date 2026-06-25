@@ -7,9 +7,11 @@ echo   dazhong2.0.py 环境一键安装
 echo ============================================================
 echo.
 
-REM 获取脚本所在目录（即 python-can-4.0.0）
-set "ROOT=%~dp0"
-if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
+REM 脚本位于 examples\dazhong2.0\，项目根目录需向上两级
+set "ROOT=%~dp0..\.."
+pushd "%ROOT%"
+set "ROOT=%CD%"
+popd
 
 echo [1/4] 检查 Python ...
 python --version

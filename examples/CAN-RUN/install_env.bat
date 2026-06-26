@@ -36,7 +36,7 @@ echo ✓ python-can 安装完成
 echo.
 
 echo [3/4] 安装其余依赖（pandas / openpyxl / pyserial 等）...
-pip install -r "%ROOT%\examples\requirements.txt"
+pip install -r "%ROOT%\examples\CAN-RUN\requirements.txt"
 if errorlevel 1 (
     echo ✗ 依赖安装失败
     pause

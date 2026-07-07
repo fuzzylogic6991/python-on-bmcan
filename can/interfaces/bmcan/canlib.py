@@ -239,7 +239,7 @@ class BmCanBus(BusABC):
             bmapi.BM_WaitForNotifications(ctypes.byref(self._notification), 1, time_left_ms)
 
     def send(self, msg, timeout=None):
-        timeoutms = int(timeout*1000) if timeout is not None else -1
+        timeoutms = int(timeout*1000) if timeout is not None else 2000  # default 2s to prevent infinite block
         timestamp = ctypes.c_uint32()
         if type(msg) is bmapi.BM_CanMessageTypeDef:
             bmmsg = msg

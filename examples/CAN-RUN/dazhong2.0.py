@@ -62,6 +62,7 @@ DEFAULT_CAN_CONFIG = {
     'security_request_id': 0x711,    # ★ 安全访问请求ID（tx）
     'security_response_id': 0x719,   # ★ 安全访问响应ID（rx）
     'security_timeout': 2.0,         # 安全访问超时
+    'bus_send_timeout': 1.0,         # ★ bus.send超时（秒），防止ECU断联后阻塞
     'tp3e_interval': 3.0,             # ★ 3E00发送周期（秒）
     'tp3e_wait_after': 0.1,           # ★ 3E00发送后等待（秒）
     'tp3e_arb_id': 0x711,             # ★ 3E00发送ID
@@ -80,7 +81,7 @@ LOOP_GAP = 5.0                       # 循环间隔时间（秒）
 # 三、文件路径配置
 # ────────────────────────────────────────────────
 DLL_PATH = r"E:\Edownload\input\VW_seed_to_key.dll"        # ★ 安全算法DLL路径
-EXCEL_PLAN_PATH = r"E:\Edownload\input\大众22验证.xlsx"  # ★ Excel配置文件路径
+EXCEL_PLAN_PATH = r"E:\Edownload\input\CAN测试用例_0x711_19条.xlsx"  # ★ Excel配置文件路径
 OUTPUT_DIR = r"E:\Edownload\input\output"                          # ★ 结果输出目录
 LISTENER_LOG_DIR = r"E:\Edownload\ouput"               # ★ 监听日志目录
 ENABLE_LISTENER_LOG = False                       # ★ 是否启用独立监听日志（大多数时候不需要）
@@ -387,6 +388,17 @@ def extract_isotp_payload(frames: List[List[int]], can_mode: int = 1,
             # 跳过 TesterPresent 响应（PCI=0x02, SID=0x7E）
             if frame[0] == 0x02 and frame[1] == 0x7E:
                 continue
+        # ★★★ 过滤 NRC 78（RequestCorrectlyReceived-ResponsePending）★★★
+        # 格式：[PCI] 7F xx 78，单帧。跳过它，让后续实际响应帧被正确处理
+        if len(frame) >= 4:
+            pci_byte = frame[0]
+            if (pci_byte & 0xF0) == 0x00:  # 单帧
+                sf_dl = pci_byte & 0x0F if pci_byte != 0x00 else (frame[1] if len(frame) > 1 else 0)
+                data_start = 1 if pci_byte != 0x00 else 2
+                if sf_dl >= 3 and len(frame) >= data_start + 3:
+                    data = frame[data_start:data_start + sf_dl]
+                    if data[0] == 0x7F and len(data) >= 3 and data[2] == 0x78:
+                        continue  # NRC 78, skip
         filtered_frames.append(frame)
 
     if not filtered_frames:
@@ -513,7 +525,10 @@ def periodic_send(bus, arbitration_id: int, data: List[int], period: float,
             is_extended_id=config['is_extended_id'], is_fd=is_fd
         )
         with BUS_SEND_LOCK:
-            bus.send(msg)
+            try:
+                bus.send(msg)
+            except Exception:
+                pass  # ECU断联时send超时，静默跳过
         logger_obj.log_sent_message(msg, time.time())
         time.sleep(period)
 
@@ -624,7 +639,7 @@ class CanMessageLogger:
             '数据 (十六进制)': ' '.join(f"{b:02X}" for b in data_list),
             '数据 (ASCII)': bytes_to_ascii(data_list),
             '测试用例ID': test_id or self.current_test_case_id or '',
-            '测试项': test_name or self.current_test_name or '',
+            '测试标题': test_name or self.current_test_name or '',
             '结果': '',
             '肯定响应值': '',
             '否定响应值': '',
@@ -642,7 +657,7 @@ class CanMessageLogger:
         self.service28_monitor_logs.append({
             '时间': datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3],
             '测试用例ID': test_id,
-            '测试项': test_name,
+            '测试标题': test_name,
             '监控目标ID': f'0x{monitor_id:X}',
             '实际CAN ID': f'0x{msg.arbitration_id:X}',
             '数据长度': msg.dlc,
@@ -870,7 +885,7 @@ class CanMessageLogger:
         """构建【测试汇总】Sheet"""
         S = self._excel_styles()
         summary_cols = [
-            ('序号', 6), ('轮次', 6), ('测试用例ID', 16), ('测试项', 36),
+            ('序号', 6), ('轮次', 6), ('测试用例ID', 16), ('测试标题', 36),
             ('请求数据', 20), ('结果', 10), ('肯定响应值', 22), ('否定响应值', 18),
             ('响应内容(HEX)', 30), ('响应内容(ASCII)', 24), ('数据库获取值', 18), ('期望来源', 36),
         ]
@@ -938,7 +953,7 @@ class CanMessageLogger:
         detail_cols = [
             ('序号', 6), ('时间', 22), ('Tx/Rx', 6), ('CAN ID', 12),
             ('扩展帧', 8), ('DLC', 6), ('数据(HEX)', 48), ('数据(ASCII)', 30),
-            ('所属用例ID', 16), ('所属测试项', 36),
+            ('所属用例ID', 16), ('所属测试标题', 36),
         ]
         for ci, (cn, _) in enumerate(detail_cols, 1):
             c = ws.cell(row=1, column=ci, value=cn)
@@ -957,7 +972,7 @@ class CanMessageLogger:
                 msg.get('数据 (十六进制)', ''),
                 msg.get('数据 (ASCII)', ''),
                 msg.get('测试用例ID', ''),
-                msg.get('测试项', ''),
+                msg.get('测试标题', ''),
             ]
             for ci, v in enumerate(values, 1):
                 c = ws.cell(row=seq + 1, column=ci, value=v if v is not None else '')
@@ -982,7 +997,7 @@ class CanMessageLogger:
             return
         S = self._excel_styles()
         mon_cols = [
-            ('序号', 6), ('时间', 22), ('测试用例ID', 16), ('测试项', 36),
+            ('序号', 6), ('时间', 22), ('测试用例ID', 16), ('测试标题', 36),
             ('监控目标ID', 14), ('实际CAN ID', 14), ('DLC', 6),
             ('数据(HEX)', 48), ('数据(ASCII)', 30),
         ]
@@ -995,7 +1010,7 @@ class CanMessageLogger:
                 seq,
                 log.get('时间', ''),
                 log.get('测试用例ID', ''),
-                log.get('测试项', ''),
+                log.get('测试标题', ''),
                 log.get('监控目标ID', ''),
                 log.get('实际CAN ID', ''),
                 log.get('数据长度', ''),
@@ -1043,7 +1058,7 @@ class CanMessageLogger:
         detail_cols = [
             ('序号', 6), ('时间', 22), ('Tx/Rx', 6), ('CAN ID', 12),
             ('扩展帧', 8), ('DLC', 6), ('数据(HEX)', 48), ('数据(ASCII)', 30),
-            ('所属用例ID', 16), ('所属测试项', 36),
+            ('所属用例ID', 16), ('所属测试标题', 36),
         ]
         for ci, (cn, _) in enumerate(detail_cols, 1):
             c = ws.cell(row=1, column=ci, value=cn)
@@ -1056,7 +1071,7 @@ class CanMessageLogger:
                 msg.get('CAN ID (十六进制)', ''), msg.get('扩展帧', ''),
                 msg.get('数据长度', ''), msg.get('数据 (十六进制)', ''),
                 msg.get('数据 (ASCII)', ''), msg.get('测试用例ID', ''),
-                msg.get('测试项', ''),
+                msg.get('测试标题', ''),
             ]
             for ci, v in enumerate(values, 1):
                 c = ws.cell(row=seq + 1, column=ci, value=v if v is not None else '')
@@ -1120,7 +1135,7 @@ class CanMessageLogger:
         detail_cols = [
             ('序号', 6), ('时间', 22), ('Tx/Rx', 6), ('CAN ID', 12),
             ('扩展帧', 8), ('DLC', 6), ('数据(HEX)', 48), ('数据(ASCII)', 30),
-            ('所属用例ID', 16), ('所属测试项', 36),
+            ('所属用例ID', 16), ('所属测试标题', 36),
         ]
         for ci, (cn, _) in enumerate(detail_cols, 1):
             c = ws.cell(row=1, column=ci, value=cn)
@@ -1130,7 +1145,7 @@ class CanMessageLogger:
         col_map = {
             '时间': '时间', '类型': 'Tx/Rx', 'CAN ID (十六进制)': 'CAN ID',
             '扩展帧': '扩展帧', '数据长度': 'DLC', '数据 (十六进制)': '数据(HEX)',
-            '数据 (ASCII)': '数据(ASCII)', '测试用例ID': '所属用例ID', '测试项': '所属测试项',
+            '数据 (ASCII)': '数据(ASCII)', '测试用例ID': '所属用例ID', '测试标题': '所属测试标题',
         }
         for seq_idx, (_, row) in enumerate(df.iterrows()):
             seq = seq_idx + 1
@@ -1145,7 +1160,7 @@ class CanMessageLogger:
                 str(row.get('数据 (十六进制)', '')),
                 str(row.get('数据 (ASCII)', '')),
                 str(row.get('测试用例ID', '')),
-                str(row.get('测试项', '')),
+                str(row.get('测试标题', '')),
             ]
             for ci, v in enumerate(values, 1):
                 c = ws.cell(row=seq + 1, column=ci, value=v if v is not None else '')
@@ -1777,6 +1792,7 @@ def load_send_configs_from_excel(path: str) -> List[Dict]:
         return []
 
     df = pd.read_excel(path)
+    df = df.ffill()  # ★ 向前填充合并单元格的NaN值
     configs = []
 
     for idx, row in df.iterrows():
@@ -1797,18 +1813,19 @@ def load_send_configs_from_excel(path: str) -> List[Dict]:
 
         cfg: Dict = {}
         cfg['test_case_id'] = str(tc_id_val).strip()
-        cfg['test_name'] = row.get('测试项', f"测试项{idx}")
+        cfg['test_name'] = row.get('测试标题', f"测试标题{idx}")
         # ★ 保存原始输入值（展开前），用于输出时保持与输入一致
         cfg['_input_test_case_id'] = cfg['test_case_id']
         cfg['_input_test_name'] = str(cfg['test_name'])
 
         can_id_val = row.get('CANID')
         if pd.isna(can_id_val):
-            continue
-        try:
-            cfg['arbitration_id'] = int(str(can_id_val), 0)
-        except ValueError:
-            continue
+            cfg['arbitration_id'] = None  # 无CANID不跳过，执行时跳过发送
+        else:
+            try:
+                cfg['arbitration_id'] = int(str(can_id_val), 0)
+            except ValueError:
+                cfg['arbitration_id'] = None  # 格式错误也设为None
 
         cfg['request_data_str'] = str(row.get('请求数据', '')).strip().upper().replace(' ', '')
         cfg['expected_db_id'] = int(row['期望DBID']) if pd.notna(row.get('期望DBID')) else None
@@ -2011,6 +2028,21 @@ def send_and_receive_can_messages(send_configs: List[Dict],
             can_logger.current_input_test_name = cfg.get('_input_test_name', str(cfg['test_name']))
             can_logger.current_request_data = cfg['request_data_str']
             arb_id = cfg['arbitration_id']
+            if arb_id is None:
+                # CANID为空，跳过发送但计入结果
+                _result_data = {
+                    '测试用例ID': cfg.get('_input_test_case_id', cfg['test_case_id']),
+                    '测试标题': cfg.get('_input_test_name', str(cfg['test_name'])),
+                    '结果': '失败（超时）',
+                    '肯定响应值': '',
+                    '否定响应值': '',
+                    '超时待检项': '',
+                }
+                can_logger.test_results[(cfg['test_case_id'], cfg['test_name'])] = _result_data
+                _id = cfg.get('_input_test_case_id', cfg['test_case_id'])
+                _status_text = '跳过（无CANID）'
+                print(f"  [{idx}/{total}] ID:{_id}  ->  {_status_text}")
+                continue
             handler = get_handler(cfg, config)
 
             # 继电器命令

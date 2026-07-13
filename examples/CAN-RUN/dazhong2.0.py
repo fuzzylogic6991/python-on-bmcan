@@ -676,7 +676,7 @@ class CanMessageLogger:
             return
         entry = self._create_log_entry('接收', msg, timestamp)
         self.messages.append(entry)
-        self.current_response_frames.append(list(msg.data))
+        # ★ current_response_frames 由 receive() 单独管理，此处不再追加
 
     def finalize_and_analyze_response(self, response_id: int = 0x7BE):
         """分析响应，增加对28服务响应（68 xx）的处理"""
@@ -898,7 +898,7 @@ class CanMessageLogger:
         result_map = self.test_results
         order = self.execution_order
         if not order:
-            return
+            return 0, 0, 0
 
         # 统计
         pass_count = fail_count = neg_count = 0
@@ -1262,10 +1262,13 @@ class UDSServiceHandler:
 
         while time.time() - start_time < cfg['response_timeout']:
             msg = bus.recv(timeout=0.1)
-            if msg and logger._should_log(msg.arbitration_id):
-                logger.log_received_message(msg, time.time())
-                # 只有响应ID的帧才重置计时器（支持多帧响应）
+            if msg:
+                # ★ 所有帧进 messages（受 _should_log 过滤）
+                if logger._should_log(msg.arbitration_id):
+                    logger.log_received_message(msg, time.time())
+                # ★ 只有响应ID的帧才加入 current_response_frames 并重置计时器
                 if msg.arbitration_id == response_id:
+                    logger.current_response_frames.append(list(msg.data))
                     start_time = time.time()
 
                     # 处理多帧流控
@@ -1792,7 +1795,12 @@ def load_send_configs_from_excel(path: str) -> List[Dict]:
         return []
 
     df = pd.read_excel(path)
-    df = df.ffill()  # ★ 向前填充合并单元格的NaN值
+    # ★ 仅对可能合并的列做前向填充，排除"是否周期发送/周期时间/周期CAN模式/是否启用"等逐行配置列
+    _merge_cols = ['测试用例ID', '测试标题', 'CANID', '请求数据', '期望HEX', '期望DBID',
+                   '响应超时时间', '等待间隔时间', '监控CANID', '监控时长(秒)', '期望报文数',
+                   '前置CANID', '前置请求数据']
+    _existing = [c for c in _merge_cols if c in df.columns]
+    df[_existing] = df[_existing].ffill()
     configs = []
 
     for idx, row in df.iterrows():

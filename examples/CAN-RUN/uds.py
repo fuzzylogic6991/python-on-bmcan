@@ -43,140 +43,27 @@ import subprocess
 # 【项目配置区】新项目只需修改此区域 ★★★
 # ══════════════════════════════════════════════════════════════
 
-# ────────────────────────────────────────────────
-# 一、CAN通信配置
-# ────────────────────────────────────────────────
-DEFAULT_CAN_CONFIG = {
-    'interface': 'bmcan',            # ★ CAN卡类型（bmcan/vector等）
-    'channel': 0,                    # ★ 通道号
-    'bitrate': 500000,               # ★ 波特率
-    'data_bitrate': 2000000,         # ★ FD数据波特率
-    'can_mode': 2,                   # ★ CAN模式：0=经典CAN, 1=FD(无BRS), 2=FD(有BRS), 3=FD(BRS,短帧不填充)
-    'is_extended_id': False,         # ★ 是否扩展帧
-    'response_timeout': 2.0,         # 响应超时时间
-    'wait_after_request': 0.2,       # 请求后等待时间
-    'allowed_ids': {0x711, 0x719},   # ★ 日志记录的CAN ID（tx/rx）
-    'flow_control_data': [0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00],  # 流控帧数据
-    'multi_frame_gap': 0.02,         # 多帧间隔
-    'fc_timeout': 1.0,               # 流控超时
-    'security_request_id': 0x711,    # ★ 安全访问请求ID（tx）
-    'security_response_id': 0x719,   # ★ 安全访问响应ID（rx）
-    'security_timeout': 2.0,         # 安全访问超时
-    'bus_send_timeout': 1.0,         # ★ bus.send超时（秒），防止ECU断联后阻塞
-    'tp3e_interval': 3.0,             # ★ 3E00发送周期（秒）
-    'tp3e_wait_after': 0.1,           # ★ 3E00发送后等待（秒）
-    'tp3e_arb_id': 0x711,             # ★ 3E00发送ID
-    'tres': True,                     # 自动发送流控
-    'fd_pad_to_8': True,             # FD帧填充到8字节
-    'pad_byte': 0xCC,                # ★★★ 填充字节（保留1.2的0xCC）
-}
-
-# ────────────────────────────────────────────────
-# 二、执行控制配置
-# ────────────────────────────────────────────────
-LOOP_COUNT = 1                       # ★ 循环执行次数，1 = 只执行一次
-LOOP_GAP = 5.0                       # 循环间隔时间（秒）
-
-# ────────────────────────────────────────────────
-# 三、文件路径配置
-# ────────────────────────────────────────────────
-DLL_PATH = r"E:\Edownload\input\VW_seed_to_key.dll"        # ★ 安全算法DLL路径
-EXCEL_PLAN_PATH = r"E:\Edownload\input\CAN测试用例_0x711_19条.xlsx"  # ★ Excel配置文件路径
-OUTPUT_DIR = r"E:\Edownload\input\output"                          # ★ 结果输出目录
-LISTENER_LOG_DIR = r"E:\Edownload\ouput"               # ★ 监听日志目录
-ENABLE_LISTENER_LOG = False                       # ★ 是否启用独立监听日志（大多数时候不需要）
-
-# ────────────────────────────────────────────────
-# 四、继电器配置（程控电源控制）
-# ────────────────────────────────────────────────
-SERIAL_PORT = "COM99"                # ★ 继电器串口号
-SERIAL_BAUDRATE = 9600               # 波特率
-SERIAL_BYTESIZE = serial.EIGHTBITS   # 数据位
-SERIAL_PARITY = serial.PARITY_NONE   # 校验位
-SERIAL_STOPBITS = serial.STOPBITS_ONE  # 停止位
-SERIAL_TIMEOUT = 0.5                 # 超时时间
-
-RELAY_COMMANDS = {
-    # ★ 继电器命令（根据实际硬件协议修改）
-    'KL15 on': 'A0 02 00 A2',        # KL15上电
-    'KL15 off': 'A0 02 01 A3',       # KL15下电
-    'KL30 on': 'A0 01 00 A1',        # KL30上电
-    'KL30 off': 'A0 01 01 A2',       # KL30下电
-}
-
-# ────────────────────────────────────────────────
-# 五、22服务展开规则配置 ★★★
-# ────────────────────────────────────────────────
-# ★ 修改此列表可自定义22服务的展开步骤
-# ★ 每个元素代表一个步骤，格式：{请求, 期望响应前缀, 步骤名称, 等待时间}
-# ★ {DID} 会自动替换为实际的DID值
-SERVICE22_EXPANSION_STEPS = [
-    # # 步骤1：切默认会话
-    # {'request': '1001', 'expected': '50 01', 'name': '切默认会话', 'wait': 0.2},
-    # # 步骤2：22读取DID
-    {'request': '22{DID}', 'expected': '62 {DID}', 'name': '22读取', 'wait': 0.2},
-    # # 步骤3：切扩展会话
-    # {'request': '1003', 'expected': '50 03', 'name': '切扩展会话', 'wait': 0.2},
-    # # 步骤4：22再读取
-    # {'request': '22{DID}', 'expected': '62 {DID}', 'name': '22再读取', 'wait': 0.2},
-    # # 步骤5：切刷新会话
-    # {'request': '1002', 'expected': '50 02', 'name': '切刷新会话', 'wait': 6.0},    # ★ 6秒
-    # # 步骤6：刷新会话下22再读取
-    # {'request': '22{DID}', 'expected': '62 {DID}', 'name': '刷新会话下22再读取', 'wait': 0.2},
-    # # 步骤7：切回默认会话
-    # {'request': '1001', 'expected': '50 01', 'name': '切回默认会话', 'wait': 60.0}, # ★ 60秒
-]
-
-# ────────────────────────────────────────────────
-# 六、27服务安全访问配置 ★★★
-# ────────────────────────────────────────────────
-# ★ VW安全访问流程参数（Excel触发值：KEY）
-SERVICE27_CONFIG = {
-    'session_request': '1003',        # ★ 切换会话请求（默认扩展会话）
-    'session_expected': '50 03',      # ★ 会话期望响应
-    'seed_request': '2701',           # ★ 请求种子
-    'seed_expected_sid': 0x67,        # ★ 种子响应SID
-    'seed_expected_sub': 0x01,        # ★ 种子响应子功能
-    'key_request': '2702',            # ★ 发送密钥请求
-    'key_expected_sid': 0x67,         # ★ 密钥验证成功SID
-    'key_expected_sub': 0x02,         # ★ 密钥验证成功子功能
-}
-
-# ★ VW安全访问流程参数（Excel触发值：KEY1）
-SERVICE27_CONFIG_1 = {
-    'session_request': '1002',        # ★ 切换会话请求（刷新会话）
-    'session_expected': '50 02',      # ★ 会话期望响应
-    'seed_request': '2705',           # ★ 请求种子
-    'seed_expected_sid': 0x67,        # ★ 种子响应SID
-    'seed_expected_sub': 0x05,        # ★ 种子响应子功能
-    'key_request': '2706',            # ★ 发送密钥请求
-    'key_expected_sid': 0x67,         # ★ 密钥验证成功SID
-    'key_expected_sub': 0x06,         # ★ 密钥验证成功子功能
-}
-
-# ────────────────────────────────────────────────
-# 七、BA安全访问配置 ★★★
-# ────────────────────────────────────────────────
-# ★ BA安全访问流程参数（Excel触发值：KEYBB）
-SERVICE_BA27_CONFIG = {
-    'seed_request': 'BA01',           # ★ 请求种子
-    'seed_expected_sid': 0xFA,        # ★ 种子响应SID
-    'seed_expected_sub': 0x01,        # ★ 种子响应子功能
-    'key_request': 'BA02',            # ★ 发送密钥请求
-}
-
-# ────────────────────────────────────────────────
-# 八、文件分段写入配置 ★★★ 新增
-# ────────────────────────────────────────────────
-FILE_SEGMENT_CONFIG = {
-    'excel_max_rows': 4000,          # Excel单段最大行数
-    'log_max_size_mb': 10,           # Log单文件最大大小（MB）
-    'auto_save_interval': 500,        # 自动保存间隔（测试用例数）
-    'enable_segment_write': True,    # 是否启用分段写入
-}
-
-# ★★★ 全局 bus.send 线程锁：bmcan 后端非线程安全，强制串行发送 ★★★
-BUS_SEND_LOCK = threading.Lock()
+# ══════════════════════════════════════════════════════════════
+# 项目配置加载 ★★★ 新增
+# ══════════════════════════════════════════════════════════════
+# 优先级：
+#   1. 环境变量 CAN_PROJECT (指定配置文件路径，如 CAN_PROJECT=config_guangqi)
+#   2. 默认加载 config_dazhong（大众项目）
+# 新项目用法：复制 config_dazhong.py → config_xxx.py，修改后设置环境变量即可
+import os as _os
+import sys as _sys
+_config_name = _os.environ.get('CAN_PROJECT', 'config_dazhong')
+try:
+    _config = __import__(_config_name)
+except ImportError:
+    _config_dir = _os.path.dirname(_os.path.abspath(__file__))
+    if _config_dir not in _sys.path:
+        _sys.path.insert(0, _config_dir)
+    _config = __import__(_config_name)
+# 将配置文件中的所有公开属性注入当前模块
+for _attr in dir(_config):
+    if not _attr.startswith('_'):
+        globals()[_attr] = getattr(_config, _attr)
 
 # ══════════════════════════════════════════════════════════════
 # 【配置区结束】以上为项目配置，以下为通用代码 ★★★
@@ -475,6 +362,16 @@ def query_tbox_data_by_id(param_id: int) -> Optional[str]:
     return result
 
 
+def _parse_pipe_db_result(db_result: str):
+    """解析管道分隔的DB查询结果: '0|ParamName|Value|...' → (显示值, 比对值)"""
+    if not db_result:
+        return '', ''
+    parts = db_result.strip().split('|')
+    if len(parts) >= 3:
+        return f"{parts[1]}:{parts[2]}", parts[2]
+    return db_result, db_result
+
+
 # ────────────────────────────────────────────────
 # 继电器控制
 # ────────────────────────────────────────────────
@@ -732,27 +629,27 @@ class CanMessageLogger:
         }
 
         sid = payload[0] if payload else None
-        FILL_BYTE = 0x00
 
         if sid == 0x7F and len(payload) >= 3:
             result_dict['否定响应值'] = f"7F {payload[1]:02X} {payload[2]:02X}"
             result_dict['结果'] = '否定响应'
         else:
             if sid == 0x62 and len(payload) >= 3:
-                # 22服务响应
+                # 22服务响应 — ISOTP已精确提取有效字节，不剥任何数据
                 data_part = payload[3:]
-                while data_part and data_part[-1] == FILL_BYTE:
-                    data_part.pop()
                 result_dict['肯定响应值'] = f"62 {payload[1]:02X} {payload[2]:02X}"
                 result_dict['22服务内容(hex)'] = ' '.join(f"{b:02X}" for b in data_part)
                 result_dict['22服务内容(ascii)'] = bytes_to_ascii(data_part)
             elif sid == 0x68:
-                # ★ 28服务响应（新增）
                 result_dict['肯定响应值'] = f"68 {payload[1]:02X}" if len(payload) >= 2 else "68"
+            elif sid == 0xFB and len(payload) >= 4:
+                # BB服务响应 — ISOTP已精确提取有效字节，不剥任何数据
+                data_part = payload[4:]
+                result_dict['肯定响应值'] = ' '.join(f"{b:02X}" for b in payload)
+                result_dict['22服务内容(hex)'] = ' '.join(f"{b:02X}" for b in data_part)
+                result_dict['22服务内容(ascii)'] = bytes_to_ascii(data_part)
             else:
                 # 其他服务响应
-                while payload and payload[-1] == FILL_BYTE:
-                    payload.pop()
                 result_dict['肯定响应值'] = ' '.join(f"{b:02X}" for b in payload)
 
             result_dict['结果'] = '通过'
@@ -787,11 +684,12 @@ class CanMessageLogger:
         comparison_mode = cfg.get('_comparison_mode', 'exact')
 
         if cfg.get('expected_db_id') is not None:
-            db_val = query_tbox_data_by_id(cfg['expected_db_id']) or ''
+            db_raw = query_tbox_data_by_id(cfg['expected_db_id']) or ''
+            db_display, db_compare = _parse_pipe_db_result(db_raw)
             ascii_val = result.get('22服务内容(ascii)', '')
-            passed = (ascii_val == db_val)
+            passed = (ascii_val == db_compare)
             result['结果'] = '通过' if passed else '失败'
-            result['数据库获取值'] = db_val
+            result['数据库获取值'] = db_display
             result['期望来源'] = f"DB id={cfg['expected_db_id']}"
 
         elif cfg.get('expected_hex_str'):
@@ -1795,32 +1693,54 @@ def load_send_configs_from_excel(path: str) -> List[Dict]:
         return []
 
     df = pd.read_excel(path)
-    # ★ 仅对可能合并的列做前向填充，排除"是否周期发送/周期时间/周期CAN模式/是否启用"等逐行配置列
-    _merge_cols = ['测试用例ID', '测试标题', 'CANID', '请求数据', '期望HEX', '期望DBID',
-                   '响应超时时间', '等待间隔时间', '监控CANID', '监控时长(秒)', '期望报文数',
-                   '前置CANID', '前置请求数据']
-    _existing = [c for c in _merge_cols if c in df.columns]
-    df[_existing] = df[_existing].ffill()
+    # ★ 仅对"测试用例ID"和"测试标题"做前向填充（这两列是唯一可能合并的列）
+    #    其他列（期望HEX/期望DBID/是否启用/是否周期发送等）都是逐行配置，绝不填充
+    for _col in ('测试用例ID', '测试标题'):
+        if _col in df.columns:
+            df[_col] = df[_col].ffill()
     configs = []
 
     for idx, row in df.iterrows():
         if row.isna().all():
             continue
 
-        # ★ 测试用例ID必填校验
+        # ★ 测试用例ID必填校验（未填写则静默跳过）
         tc_id_val = row.get('测试用例ID')
         if pd.isna(tc_id_val) or str(tc_id_val).strip() == '':
-            print(f"  ⚠ 第{idx+1}行（Excel行号）缺少测试用例ID，已跳过")
             continue
 
-        enable_str = str(row.get('是否启用', '')).strip().lower()
+        # ★ 是否启用判定：先归一化数字（0.0→0），再转字符串匹配
+        _enable_raw = row.get('是否启用')
+        if isinstance(_enable_raw, float) and pd.notna(_enable_raw) and _enable_raw == int(_enable_raw):
+            _enable_raw = int(_enable_raw)
+        enable_str = str(_enable_raw).strip().lower() if pd.notna(_enable_raw) else ''
         is_enabled = enable_str not in ['0', 'false', 'no', '禁用', '跳过', '关', '关闭', '否']
 
         if not is_enabled:
+            # ★ 在结果中记录"跳过"，而非静默忽略
+            _skip_cfg = {
+                'test_case_id': str(int(tc_id_val) if isinstance(tc_id_val, float) and tc_id_val == int(tc_id_val) else tc_id_val).strip(),
+                'test_name': row.get('测试标题', f"测试标题{idx}"),
+                '_input_test_case_id': str(int(tc_id_val) if isinstance(tc_id_val, float) and tc_id_val == int(tc_id_val) else tc_id_val).strip(),
+                '_input_test_name': str(row.get('测试标题', f"测试标题{idx}")),
+                'arbitration_id': None,
+                'request_data_str': '',
+                'response_timeout': 0,
+                'wait_after_request': 0,
+                'is_relay_command': False,
+                'is_periodic': False,
+                'should_stop_periodic': False,
+                '_skip_reason': '未启用',  # ★ 标记跳过原因
+            }
+            configs.append(_skip_cfg)
             continue
 
         cfg: Dict = {}
-        cfg['test_case_id'] = str(tc_id_val).strip()
+        # ★ ID去小数：pandas读数字为float，如 9.0 → "9"
+        _tc_raw = tc_id_val
+        if isinstance(_tc_raw, float) and _tc_raw == int(_tc_raw):
+            _tc_raw = int(_tc_raw)
+        cfg['test_case_id'] = str(_tc_raw).strip()
         cfg['test_name'] = row.get('测试标题', f"测试标题{idx}")
         # ★ 保存原始输入值（展开前），用于输出时保持与输入一致
         cfg['_input_test_case_id'] = cfg['test_case_id']
@@ -1836,7 +1756,13 @@ def load_send_configs_from_excel(path: str) -> List[Dict]:
                 cfg['arbitration_id'] = None  # 格式错误也设为None
 
         cfg['request_data_str'] = str(row.get('请求数据', '')).strip().upper().replace(' ', '')
-        cfg['expected_db_id'] = int(row['期望DBID']) if pd.notna(row.get('期望DBID')) else None
+        cfg['expected_db_id'] = None
+        _eid = row.get('期望DBID')
+        if pd.notna(_eid):
+            try:
+                cfg['expected_db_id'] = int(_eid)
+            except (ValueError, TypeError):
+                pass  # 非数字（如文字备注）→ 当作未填写
         cfg['expected_hex_str'] = str(row.get('期望HEX', '')) if pd.notna(row.get('期望HEX')) else None
         cfg['response_timeout'] = float(row.get('响应超时时间', DEFAULT_CAN_CONFIG['response_timeout']))
         cfg['wait_after_request'] = float(row.get('等待间隔时间', DEFAULT_CAN_CONFIG['wait_after_request']))
@@ -1951,8 +1877,9 @@ def emergency_save(signum=None, frame=None):
 
     if _global_logger is not None:
         try:
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_emergency')
-            excel_file = os.path.join(_global_output_dir, f"CAN测试结果_{timestamp}.xlsx")
+            _input_name = os.path.splitext(os.path.basename(EXCEL_PLAN_PATH))[0]
+            timestamp = datetime.now().strftime('%m%d-%H%M')
+            excel_file = os.path.join(_global_output_dir, f"{timestamp}_{_input_name}_emergency.xlsx")
             _global_logger.save_to_excel_segmented(excel_file)
             print(f"✓ 紧急保存Excel成功: {excel_file}")
         except Exception as e:
@@ -2037,18 +1964,18 @@ def send_and_receive_can_messages(send_configs: List[Dict],
             can_logger.current_request_data = cfg['request_data_str']
             arb_id = cfg['arbitration_id']
             if arb_id is None:
-                # CANID为空，跳过发送但计入结果
+                _skip_reason = cfg.get('_skip_reason', '无CANID')
                 _result_data = {
                     '测试用例ID': cfg.get('_input_test_case_id', cfg['test_case_id']),
                     '测试标题': cfg.get('_input_test_name', str(cfg['test_name'])),
-                    '结果': '失败（超时）',
+                    '结果': f'跳过（{_skip_reason}）',
                     '肯定响应值': '',
                     '否定响应值': '',
                     '超时待检项': '',
                 }
                 can_logger.test_results[(cfg['test_case_id'], cfg['test_name'])] = _result_data
                 _id = cfg.get('_input_test_case_id', cfg['test_case_id'])
-                _status_text = '跳过（无CANID）'
+                _status_text = f'跳过（{_skip_reason}）'
                 print(f"  [{idx}/{total}] ID:{_id}  ->  {_status_text}")
                 continue
             handler = get_handler(cfg, config)
@@ -2121,8 +2048,11 @@ def send_and_receive_can_messages(send_configs: List[Dict],
             _res = can_logger.test_results.get(_result_key, {})
             _status = _res.get('结果', '未记录')
             _in_id = cfg.get('_input_test_case_id', cfg['test_case_id'])
+            _in_name = cfg.get('_input_test_name', str(cfg['test_name']))
             _resp = _res.get('肯定响应值', '') or _res.get('否定响应值', '')
-            print(f"[{idx}/{total}] ID:{_in_id}  ->  {_status}  {_resp}")
+            # ★ 长响应截断显示（终端不刷屏）
+            _resp_short = _resp if len(_resp) <= 60 else _resp[:57] + '...'
+            print(f"[{idx}/{total}] ID:{_in_id} {_in_name}  ->  {_status}  {_resp_short}")
     except Exception as e:
         print(f"发生错误：{e}")
         import traceback
@@ -2175,8 +2105,9 @@ def main():
             time.sleep(LOOP_GAP)
 
     # ★ 所有轮次跑完，统一保存
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    excel_file = os.path.join(OUTPUT_DIR, f"CAN测试结果_{timestamp}.xlsx")
+    _input_name = os.path.splitext(os.path.basename(EXCEL_PLAN_PATH))[0]
+    timestamp = datetime.now().strftime('%m%d-%H%M')
+    excel_file = os.path.join(OUTPUT_DIR, f"{timestamp}_{_input_name}.xlsx")
     can_logger.save_to_excel_segmented(excel_file)
     global _global_saved
     _global_saved = True  # ★ 标记已正常保存，防止atexit重复触发

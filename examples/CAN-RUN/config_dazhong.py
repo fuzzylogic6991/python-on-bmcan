@@ -15,7 +15,7 @@ DEFAULT_CAN_CONFIG = {
     'channel': 0,                    # ★ 通道号
     'bitrate': 500000,               # ★ 波特率
     'data_bitrate': 2000000,         # ★ FD数据波特率
-    'can_mode': 2,                   # ★ CAN模式：0=经典CAN, 1=FD(无BRS), 2=FD(有BRS), 3=FD(BRS,短帧不填充)
+    'can_mode': 2,                   # ★ CAN模式：0=经典CAN, 1=FD(无BRS,最大最小都是8字节), 2=FD(有BRS,最小8字节，最大64字节), 3=FD(BRS,短帧不填充，,最小3字节，最大64字节)
     'is_extended_id': False,         # ★ 是否扩展帧
     'response_timeout': 2.0,         # 响应超时时间
     'wait_after_request': 0.2,       # 请求后等待时间

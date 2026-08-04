@@ -83,22 +83,24 @@ FD_DLC_MAP = {
 # ────────────────────────────────────────────────
 # 工具函数
 # ────────────────────────────────────────────────
-def load_vw_dll():
-    """加载VW安全算法DLL"""
+def load_security_dll():
+    """加载安全算法DLL (配置驱动，从 SECURITY_DLL_CONFIG 读取签名)"""
+    if not DLL_PATH:
+        print("⚠ 警告：DLL_PATH 为空，安全算法DLL未配置")
+        return None
     try:
+        cfg = SECURITY_DLL_CONFIG
         dll = ctypes.CDLL(DLL_PATH)
-        dll.VW_Seed2Key.argtypes = [
-            ctypes.POINTER(ctypes.c_uint8),  # seed
-            ctypes.POINTER(ctypes.c_uint8)  # key
-        ]
-        dll.VW_Seed2Key.restype = ctypes.c_int16
+        func = getattr(dll, cfg['function_name'])
+        func.argtypes = cfg['argtypes']
+        func.restype = cfg['restype']
         return dll
     except Exception as e:
         print(f"⚠ 警告：加载DLL失败: {e}")
         return None
 
 
-VW_DLL = load_vw_dll()
+SECURITY_DLL = load_security_dll()
 
 
 def calculate_key_level1(seed_bytes: List[int]) -> Optional[List[int]]:
@@ -114,27 +116,48 @@ def calculate_key_level1(seed_bytes: List[int]) -> Optional[List[int]]:
     key[3] = (data[2] & 0xF0) | ((data[1] & 0x0F) >> 4)
     return [k & 0xFF for k in key]
 
-def VW_Seed2Key(seed: bytes) -> bytes:
+def VW_Seed2Key(seed: bytes, security_level: int = 1) -> bytes:
     """
-    调用DLL计算安全密钥
-    :param seed: 4字节种子
-    :return: 4字节密钥
+    调用DLL计算安全密钥 (配置驱动，签名由 SECURITY_DLL_CONFIG 决定)
+    :param seed: 种子字节
+    :param security_level: 安全等级 (1/3/5，从27服务的子功能获取)
+    :return: 密钥字节
     """
-    if VW_DLL is None:
-        raise RuntimeError("VW DLL 未正确加载")
+    if SECURITY_DLL is None:
+        raise RuntimeError("安全算法DLL未正确加载")
 
-    if len(seed) != 4:
-        raise ValueError(f"种子长度必须为4字节，当前: {len(seed)}")
+    cfg = SECURITY_DLL_CONFIG
+    dll = SECURITY_DLL
+    func = getattr(dll, cfg['function_name'])
+    buf_size = cfg.get('key_buffer_size', 16)
 
-    seed_array = (ctypes.c_uint8 * 4)(*seed)
-    key_array = (ctypes.c_uint8 * 4)()
+    # 构建参数池 (根据 arg_map 占位符生成实际参数)
+    seed_arr = (ctypes.c_uint8 * len(seed))(*seed)
+    key_arr = (ctypes.c_uint8 * buf_size)()
+    variant_arr = (ctypes.c_uint8 * 1)(0)
+    key_len = ctypes.c_uint32()
 
-    result = VW_DLL.VW_Seed2Key(seed_array, key_array)
+    param_pool = {
+        'seed':        seed_arr,
+        'seed_len':    len(seed),
+        'level':       security_level,
+        'variant':     variant_arr,
+        'key':         key_arr,
+        'key_max':     buf_size,
+        'key_len_out': ctypes.byref(key_len),
+    }
+
+    args = [param_pool[name] for name in cfg['arg_map']]
+    result = func(*args)
 
     if result != 0:
-        raise RuntimeError(f"VW_Seed2Key 返回错误: {result}")
+        raise RuntimeError(f"{cfg['function_name']} 返回错误: {result}")
 
-    return bytes(key_array)
+    # 根据配置决定如何取密钥长度
+    if 'key_len_out' in cfg['arg_map']:
+        return bytes(key_arr[:key_len.value])
+    else:
+        return bytes(key_arr)
 
 
 def get_fd_dlc(length: int) -> int:
@@ -676,8 +699,13 @@ class CanMessageLogger:
         if not result:
             return
 
-        # ★ 超时结果保持不变，不再覆盖
+        # ★ 超时结果：仅当期望不是"不回复"时才保持不变
         if '超时' in result.get('结果', ''):
+            exp_str = str(cfg.get('expected_hex_str', '')).strip().upper()
+            if exp_str in ('NORESP', 'NORESPONSE', 'NO_RESP', 'SILENT', '不回复', '无回复'):
+                # 期望不回复 + 实际超时 = 通过
+                result['结果'] = '通过'
+                result['期望来源'] = '期望HEX（期望不回复）'
             return
 
         # 获取比对模式（默认精确匹配）
@@ -701,6 +729,15 @@ class CanMessageLogger:
                 is_positive = bool(actual) and not actual.strip().startswith('7F')
                 result['结果'] = '通过' if is_positive else '失败（期望肯定响应）'
                 result['期望来源'] = '期望HEX（空=要求肯定响应）'
+
+            elif exp_str_raw in ('NORESP', 'NORESPONSE', 'NO_RESP', 'SILENT', '不回复', '无回复'):
+                # ★★★ 期望不回复（超时=通过，有响应=失败） ★★★
+                actual = result.get('肯定响应值', '') or result.get('否定响应值', '')
+                if not actual or '超时' in result.get('结果', ''):
+                    result['结果'] = '通过'
+                else:
+                    result['结果'] = f'失败（期望不回复，实际收到: {actual}）'
+                result['期望来源'] = '期望HEX（期望不回复）'
 
             elif exp_str_raw.startswith('7F'):
                 # 7F开头 = 要求否定响应
@@ -1305,6 +1342,8 @@ class Service28Handler(UDSServiceHandler):
             '期望来源': f'28响应(肯定)+监控{expected_min}-{expected_max}帧' if monitor_id else '28响应(肯定)'
         }
         logger.execution_order.append(key)
+        # ★ 应用期望值比对（支持期望否定响应等）
+        logger.apply_comparison(cfg)
 
 class Service10Handler(UDSServiceHandler):
     """10服务：会话控制（不展开）"""
@@ -1340,16 +1379,19 @@ class Service27Handler(UDSServiceHandler):
         success = False
 
         # ★ 使用构造时传入的配置参数
-        session_req = svc_cfg['session_request']  # 如 "1003" 或 "1002"
+        session_req = svc_cfg.get('session_request', '1003')
         session_sid = int(session_req[:2], 16) + 0x40  # 10 → 50
         session_sub = int(session_req[2:4], 16)  # 03 或 02
+        skip_session = svc_cfg.get('skip_session', False)
 
-        # ═══ 步骤0：切换会话 ═══
-        self._send(bus, arb_id, [0x02, int(session_req[:2], 16), int(session_req[2:4], 16)], logger)
-        time.sleep(0.2)
+        # ═══ 步骤0：切换会话（可跳过） ═══
+        session_ok = True
+        if not skip_session:
+            self._send(bus, arb_id, [0x02, int(session_req[:2], 16), int(session_req[2:4], 16)], logger)
+            time.sleep(0.2)
+            session_ok = self._wait_positive(bus, logger, response_id, session_sid, session_sub)
 
-        # 等待会话响应
-        if self._wait_positive(bus, logger, response_id, session_sid, session_sub):
+        if session_ok:
             time.sleep(0.1)
 
             # ═══ 步骤1：请求种子 ═══
@@ -1358,18 +1400,21 @@ class Service27Handler(UDSServiceHandler):
             time.sleep(0.2)
 
             # ═══ 步骤2：获取种子 ═══
-            seed = self._wait_seed(bus, logger, response_id,
+            seed, seed_error = self._wait_seed(bus, logger, response_id,
                                    svc_cfg['seed_expected_sid'],
                                    svc_cfg['seed_expected_sub'])
 
-            if seed:
+            if seed is not None:
 
                 # ═══ 步骤3：计算密钥 ═══
-                key = VW_Seed2Key(seed)
+                sec_level = svc_cfg['seed_expected_sub']  # 0x01/0x05 → 安全等级1/5
+                key = VW_Seed2Key(seed, sec_level)
 
                 # ═══ 步骤4：发送密钥 ═══
                 key_req = svc_cfg['key_request']  # 如 "2702" 或 "2706"
-                self._send(bus, arb_id, [0x06, int(key_req[:2], 16), int(key_req[2:4], 16)] + list(key) + [0xCC], logger)
+                # 自适应帧格式: PCI=SID+Sub+key_len, 不再硬编码 +[0xCC]
+                key_data = [0x02 + len(key), int(key_req[:2], 16), int(key_req[2:4], 16)] + list(key)
+                self._send(bus, arb_id, key_data, logger)
                 time.sleep(0.2)
 
                 # ═══ 步骤5：等待结果 ═══
@@ -1377,7 +1422,7 @@ class Service27Handler(UDSServiceHandler):
                                                               svc_cfg['key_expected_sid'],
                                                               svc_cfg['key_expected_sub'])
             else:
-                response_str = "获取种子失败"
+                response_str = f"获取种子失败 ({seed_error})"
         else:
             response_str = f"{session_req} 切换失败"
 
@@ -1428,8 +1473,12 @@ class Service27Handler(UDSServiceHandler):
                         return False
         return False
 
-    def _wait_seed(self, bus, logger, resp_id, expected_sid, expected_sub) -> Optional[bytes]:
-        """等待种子"""
+    def _wait_seed(self, bus, logger, resp_id, expected_sid, expected_sub) -> Tuple[Optional[bytes], str]:
+        """等待种子，返回 (seed_bytes, error_info)
+        - 成功: (bytes, "")
+        - NRC:  (None, "7F XX YY")
+        - 超时: (None, "超时")
+        """
         start = time.time()
         while time.time() - start < 2.0:
             msg = bus.recv(timeout=0.1)
@@ -1437,11 +1486,17 @@ class Service27Handler(UDSServiceHandler):
                 logger.log_received_message(msg, time.time())
                 if msg.arbitration_id == resp_id:
                     data = list(msg.data)
-                    if len(data) >= 6 and data[1] == expected_sid and data[2] == expected_sub:
-                        return bytes(data[3:7])
+                    if len(data) >= 3 and data[1] == expected_sid and data[2] == expected_sub:
+                        # 自适应种子长度：PCI 字节低 4 位 = UDS 数据长度，种子 = 总数据 - SID(1) - Sub(1)
+                        pci = data[0] & 0x0F
+                        seed_len = pci - 2 if pci > 2 else len(data) - 3
+                        seed_start = 3
+                        return bytes(data[seed_start:seed_start + seed_len]), ""
+                    elif len(data) >= 4 and data[1] == 0x7F and data[2] == expected_sid:
+                        return None, f"7F {data[2]:02X} {data[3]:02X}"
                     elif data[1] == 0x7F:
-                        return None
-        return None
+                        return None, f"7F {data[2]:02X} {data[3]:02X}" if len(data) >= 4 else "7F xx xx"
+        return None, "超时"
 
     def _wait_key_result(self, bus, logger, resp_id, expected_sid, expected_sub) -> Tuple[bool, str]:
         """等待密钥验证结果"""
@@ -1493,11 +1548,11 @@ class ServiceBA27Handler(UDSServiceHandler):
         time.sleep(0.2)
 
         # ═══ 步骤2：等待种子 ═══
-        seed = self._wait_seed(bus, logger, response_id,
+        seed, seed_error = self._wait_seed(bus, logger, response_id,
                                SERVICE_BA27_CONFIG['seed_expected_sid'],
                                SERVICE_BA27_CONFIG['seed_expected_sub'])
 
-        if seed:
+        if seed is not None:
 
             # ═══ 步骤3：计算密钥 ═══
             key_bytes = calculate_key_level1(list(seed))
@@ -1514,7 +1569,7 @@ class ServiceBA27Handler(UDSServiceHandler):
             else:
                 response_str = "密钥计算失败"
         else:
-            response_str = "获取种子失败"
+            response_str = f"获取种子失败 ({seed_error})"
 
         # ═══ 记录结果 ═══
         result_key = (test_id, test_name)
@@ -1549,7 +1604,8 @@ class ServiceBA27Handler(UDSServiceHandler):
             bus.send(msg)
         logger.log_sent_message(msg, time.time())
 
-    def _wait_seed(self, bus, logger, resp_id, expected_sid, expected_sub) -> Optional[bytes]:
+    def _wait_seed(self, bus, logger, resp_id, expected_sid, expected_sub) -> Tuple[Optional[bytes], str]:
+        """等待BA种子，返回 (seed_bytes, error_info)"""
         start = time.time()
         while time.time() - start < 2.0:
             msg = bus.recv(timeout=0.1)
@@ -1558,8 +1614,10 @@ class ServiceBA27Handler(UDSServiceHandler):
                 if msg.arbitration_id == resp_id:
                     data = list(msg.data)
                     if len(data) >= 6 and data[1] == expected_sid and data[2] == expected_sub:
-                        return bytes(data[3:7])
-        return None
+                        return bytes(data[3:7]), ""
+                    elif len(data) >= 4 and data[1] == 0x7F:
+                        return None, f"7F {data[2]:02X} {data[3]:02X}"
+        return None, "超时"
 
 
 class Service31Handler(UDSServiceHandler):
@@ -1599,12 +1657,30 @@ class TesterPresentHandler(UDSServiceHandler):
                      cfg: Dict, logger: 'CanLogger'):
         """状态控制：TP3E 启动 + 首帧 / STP3E 停止"""
         request_hex = cfg.get('request_data_str', '').upper().strip()
+        test_id = cfg['test_case_id']
+        test_name = cfg['test_name']
+
         if request_hex == 'TP3E':
             TesterPresentHandler._active = True
             TesterPresentHandler._last_send_time = time.time()
             self._send_3e00(bus, logger)
         elif request_hex == 'STP3E':
             TesterPresentHandler._active = False
+
+        # 记录测试结果（TP3E/STP3E 是状态控制，不期望响应值）
+        key = (test_id, test_name)
+        logger.test_results[key] = {
+            '请求数据': request_hex,
+            '肯定响应值': '3E00 已启动' if request_hex == 'TP3E' else '3E00 已停止',
+            '否定响应值': '',
+            '22服务内容(hex)': '',
+            '22服务内容(ascii)': '',
+            '结果': '通过',
+            '期望来源': 'TP3E 维持会话',
+            '_input_test_case_id': cfg.get('_input_test_case_id', test_id),
+            '_input_test_name': cfg.get('_input_test_name', str(test_name)),
+        }
+        logger.execution_order.append(key)
 
     def check_and_send(self, bus: 'can.interface.Bus', logger: 'CanLogger'):
         """主循环调用：检查 T2-T1≥3s 则发送续帧"""
@@ -1622,29 +1698,41 @@ class TesterPresentHandler(UDSServiceHandler):
         ★ 发送复用基类 send() 方法（自动处理单帧/多帧/CAN模式）
         ★ 接收独立实现（不调用基类 receive，避免清空诊断响应帧）
         """
+        config = self.config
+        request_id = config.get('tp3e_arb_id', 0x711)
+        response_id = config.get('security_response_id', 0x719)
+        timeout = config.get('response_timeout', 2.0)
+
+        # 构造临时 cfg，复用基类 send 发送 3E 00
         try:
-            config = self.config
-
-            # 构造临时 cfg，复用基类 send 发送 3E 00
-            
             fake_cfg = {'request_data_str': '3E 00'}
-            self.send(bus, config.get('tp3e_arb_id', 0x711), fake_cfg, logger)
+            self.send(bus, request_id, fake_cfg, logger)
+        except Exception as e:
+            print(f"⚠ 3E00 发送失败: {e}")
+            return
 
-            # ★★★ 等待并获取 7E00 响应（只接收 security_response_id 的帧）★★★
-            response_id = config.get('security_response_id', 0x719)
-            deadline = time.time() + config.get('response_timeout', 2.0)
-            response = None
-            while time.time() < deadline:
-                msg = bus.recv(timeout=0.1)
-                if msg and msg.arbitration_id == response_id:
-                    response = msg
-                    break
-            if response:
-                logger.log_received_message(response, time.time())
-
-            time.sleep(config.get('tp3e_wait_after', 0.1))
-        except Exception:
+        # ★★★ 等待并获取 7E00 响应 ★★★
+        deadline = time.time() + timeout
+        response = None
+        while time.time() < deadline:
+            msg = bus.recv(timeout=0.1)
+            if msg and msg.arbitration_id == response_id:
+                response = msg
+                break
+        if response:
+            logger.log_received_message(response, time.time())
+            data = list(response.data)
+            # 校验是否为肯定响应 7E 00
+            if len(data) >= 2 and data[1] == 0x7E:
+                if len(data) < 3 or data[2] != 0x78:  # 排除 NRC 78 (pending)
+                    pass  # 7E 00 正常
+            else:
+                pass  # 非预期响应，静默
+        else:
+            # 超时无响应也不报错，ECU可能不支持 3E00 或总线繁忙
             pass
+
+        time.sleep(config.get('tp3e_wait_after', 0.1))
 
 
 # ══════════════════════════════════════════════════════════════
@@ -1657,10 +1745,14 @@ def get_handler(cfg: Dict, config: Dict) -> UDSServiceHandler:
     # ★★★ 新增：包含BB05 → BA安全访问 ★★★
     if 'KEYBB' in request_hex:
         return ServiceBA27Handler(config)
-    # ★★★ 触发值"KEY1" → VW安全访问（2705/2706） ★★★
+    # ★★★ 触发值"KEY1" → 安全访问（2705/2706） ★★★
     request_hex = cfg.get('request_data_str', '').upper().strip()
     if request_hex == 'KEY1':
         return Service27Handler(config, service27_config=SERVICE27_CONFIG_1)
+    # ★★★ 触发值"KEY3" → 安全访问（2703/2704） ★★★
+    request_hex = cfg.get('request_data_str', '').upper().strip()
+    if request_hex == 'KEY3':
+        return Service27Handler(config, service27_config=SERVICE27_CONFIG_3)
     # ★★★ 触发值"KEY" → 安全访问（2701/2702） ★★★
     request_hex = cfg.get('request_data_str', '').upper().strip()
     if request_hex == 'KEY':
@@ -1707,6 +1799,13 @@ def load_send_configs_from_excel(path: str) -> List[Dict]:
         # ★ 测试用例ID必填校验（未填写则静默跳过）
         tc_id_val = row.get('测试用例ID')
         if pd.isna(tc_id_val) or str(tc_id_val).strip() == '':
+            continue
+
+        # ★ 跳过仅靠前向填充存在的空行（无CANID、无请求数据、无周期发送标记）
+        _canid_na = pd.isna(row.get('CANID'))
+        _req_na = pd.isna(row.get('请求数据')) or str(row.get('请求数据', '')).strip() == ''
+        _periodic_na = pd.isna(row.get('是否周期发送')) or str(row.get('是否周期发送', '')).strip() == ''
+        if _canid_na and _req_na and _periodic_na:
             continue
 
         # ★ 是否启用判定：先归一化数字（0.0→0），再转字符串匹配
@@ -1763,7 +1862,8 @@ def load_send_configs_from_excel(path: str) -> List[Dict]:
                 cfg['expected_db_id'] = int(_eid)
             except (ValueError, TypeError):
                 pass  # 非数字（如文字备注）→ 当作未填写
-        cfg['expected_hex_str'] = str(row.get('期望HEX', '')) if pd.notna(row.get('期望HEX')) else None
+        _raw_hex = row.get('期望HEX')
+        cfg['expected_hex_str'] = str(_raw_hex) if pd.notna(_raw_hex) else None
         cfg['response_timeout'] = float(row.get('响应超时时间', DEFAULT_CAN_CONFIG['response_timeout']))
         cfg['wait_after_request'] = float(row.get('等待间隔时间', DEFAULT_CAN_CONFIG['wait_after_request']))
 
@@ -1973,7 +2073,9 @@ def send_and_receive_can_messages(send_configs: List[Dict],
                     '否定响应值': '',
                     '超时待检项': '',
                 }
-                can_logger.test_results[(cfg['test_case_id'], cfg['test_name'])] = _result_data
+                # 防止空行（被前向填充了ID）覆盖已执行用例的结果
+                if (cfg['test_case_id'], cfg['test_name']) not in can_logger.test_results:
+                    can_logger.test_results[(cfg['test_case_id'], cfg['test_name'])] = _result_data
                 _id = cfg.get('_input_test_case_id', cfg['test_case_id'])
                 _status_text = f'跳过（{_skip_reason}）'
                 print(f"  [{idx}/{total}] ID:{_id}  ->  {_status_text}")

@@ -31,6 +31,7 @@ DEFAULT_CAN_CONFIG = {
     'tp3e_interval': 3.0,             # ★ 3E00发送周期（秒）
     'tp3e_wait_after': 0.1,           # ★ 3E00发送后等待（秒）
     'tp3e_arb_id': 0x703,             # ★ TODO: 改为TBOX的3E00发送ID
+    'tp3e_payload': '3E 00',           # ★ 3E 发送数据（默认 3E 00，可为 3E 80）
     'tres': True,                     # 自动发送流控
     'fd_pad_to_8': True,             # FD帧填充到8字节
     'pad_byte': 0xCC,                # ★★★ 填充字节
@@ -130,8 +131,6 @@ SERVICE22_EXPANSION_STEPS = [
 # 六、27服务安全访问配置
 # ────────────────────────────────────────────────
 SERVICE27_CONFIG = {
-    'session_request': '1003',
-    'session_expected': '50 03',
     'seed_request': '2701',
     'seed_expected_sid': 0x67,
     'seed_expected_sub': 0x01,
@@ -141,8 +140,6 @@ SERVICE27_CONFIG = {
 }
 
 SERVICE27_CONFIG_1 = {
-    'session_request': '1002',
-    'session_expected': '50 02',
     'seed_request': '2705',
     'seed_expected_sid': 0x67,
     'seed_expected_sub': 0x05,
@@ -155,15 +152,12 @@ SERVICE27_CONFIG_1 = {
 # 六、27服务安全访问配置 (等级3: 2703/2704)
 # ────────────────────────────────────────────────
 SERVICE27_CONFIG_3 = {
-    'session_request': '1002',
-    'session_expected': '50 02',
     'seed_request': '2703',
     'seed_expected_sid': 0x67,
     'seed_expected_sub': 0x03,
     'key_request': '2704',
     'key_expected_sid': 0x67,
     'key_expected_sub': 0x04,
-    'skip_session': True,             # ★ 跳过会话切换，直接请求种子
 }
 
 # ────────────────────────────────────────────────

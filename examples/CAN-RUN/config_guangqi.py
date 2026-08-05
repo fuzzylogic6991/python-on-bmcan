@@ -6,6 +6,7 @@ TBOX 项目 CAN 测试配置文件
 
 import threading
 import serial
+import ctypes
 
 # ────────────────────────────────────────────────
 # 一、CAN通信配置
@@ -30,6 +31,7 @@ DEFAULT_CAN_CONFIG = {
     'tp3e_interval': 3.0,             # ★ 3E00发送周期（秒）
     'tp3e_wait_after': 0.1,           # ★ 3E00发送后等待（秒）
     'tp3e_arb_id': 0x72D,             # ★ TODO: 改为TBOX的3E00发送ID
+    'tp3e_payload': '3E 00',           # ★ 3E 发送数据（默认 3E 00，可为 3E 80）
     'tres': True,                     # 自动发送流控
     'fd_pad_to_8': True,             # FD帧填充到8字节
     'pad_byte': 0xCC,                # ★★★ 填充字节
@@ -45,6 +47,27 @@ LOOP_GAP = 1.0                       # 循环间隔时间（秒）
 # 三、文件路径配置
 # ────────────────────────────────────────────────
 DLL_PATH = r""                       # ★ TODO: 安全算法DLL路径（如不需要留空）
+
+# ────────────────────────────────────────────────
+# 三.1、安全算法DLL函数配置 ★★★
+# 更换DLL时只需修改此配置，无需改动 uds.py
+# ────────────────────────────────────────────────
+SECURITY_DLL_CONFIG = {
+    'function_name': 'GenerateKeyEx',
+    'argtypes': [
+        ctypes.POINTER(ctypes.c_uint8),   # seed 数组指针
+        ctypes.c_uint32,                   # seed 长度
+        ctypes.c_uint32,                   # 安全等级 (1/3/5)
+        ctypes.POINTER(ctypes.c_uint8),   # variant 指针 (传空)
+        ctypes.POINTER(ctypes.c_uint8),   # key 输出缓冲区指针
+        ctypes.c_uint32,                   # key 缓冲区最大长度
+        ctypes.POINTER(ctypes.c_uint32),  # 实际 key 长度 (输出)
+    ],
+    'restype': ctypes.c_uint32,
+    'arg_map': ['seed', 'seed_len', 'level', 'variant', 'key', 'key_max', 'key_len_out'],
+    'key_buffer_size': 16,
+}
+
 EXCEL_PLAN_PATH = r"E:\Edownload\input\can_input_广汽斯润工装检测_260715.xlsx"  # ★ TODO: 测试用例Excel路径
 OUTPUT_DIR = r"E:\Edownload\input\output"                  # ★ 结果输出目录
 LISTENER_LOG_DIR = r"E:\Edownload\output"                   # ★ 监听日志目录
@@ -79,8 +102,6 @@ SERVICE22_EXPANSION_STEPS = [
 # 六、27服务安全访问配置
 # ────────────────────────────────────────────────
 SERVICE27_CONFIG = {
-    'session_request': '1003',
-    'session_expected': '50 03',
     'seed_request': '2701',
     'seed_expected_sid': 0x67,
     'seed_expected_sub': 0x01,
@@ -90,14 +111,22 @@ SERVICE27_CONFIG = {
 }
 
 SERVICE27_CONFIG_1 = {
-    'session_request': '1002',
-    'session_expected': '50 02',
     'seed_request': '2705',
     'seed_expected_sid': 0x67,
     'seed_expected_sub': 0x05,
     'key_request': '2706',
     'key_expected_sid': 0x67,
     'key_expected_sub': 0x06,
+}
+
+# ★ VW安全访问流程参数（Excel触发值：KEY3）
+SERVICE27_CONFIG_3 = {
+    'seed_request': '2703',
+    'seed_expected_sid': 0x67,
+    'seed_expected_sub': 0x03,
+    'key_request': '2704',
+    'key_expected_sid': 0x67,
+    'key_expected_sub': 0x04,
 }
 
 # ────────────────────────────────────────────────

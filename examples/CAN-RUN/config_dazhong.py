@@ -6,6 +6,7 @@
 
 import threading
 import serial
+import ctypes
 
 # ────────────────────────────────────────────────
 # 一、CAN通信配置
@@ -30,6 +31,7 @@ DEFAULT_CAN_CONFIG = {
     'tp3e_interval': 3.0,             # ★ 3E00发送周期（秒）
     'tp3e_wait_after': 0.1,           # ★ 3E00发送后等待（秒）
     'tp3e_arb_id': 0x711,             # ★ 3E00发送ID
+    'tp3e_payload': '3E 00',           # ★ 3E 发送数据（默认 3E 00，可为 3E 80）
     'tres': True,                     # 自动发送流控
     'fd_pad_to_8': True,             # FD帧填充到8字节
     'pad_byte': 0xCC,                # ★★★ 填充字节（保留1.2的0xCC）
@@ -45,6 +47,27 @@ LOOP_GAP = 5.0                       # 循环间隔时间（秒）
 # 三、文件路径配置
 # ────────────────────────────────────────────────
 DLL_PATH = r"E:\Edownload\input\VW_seed_to_key.dll"        # ★ 安全算法DLL路径
+
+# ────────────────────────────────────────────────
+# 三.1、安全算法DLL函数配置 ★★★
+# 更换DLL时只需修改此配置，无需改动 uds.py
+# ────────────────────────────────────────────────
+SECURITY_DLL_CONFIG = {
+    'function_name': 'GenerateKeyEx',
+    'argtypes': [
+        ctypes.POINTER(ctypes.c_uint8),   # seed 数组指针
+        ctypes.c_uint32,                   # seed 长度
+        ctypes.c_uint32,                   # 安全等级 (1/3/5)
+        ctypes.POINTER(ctypes.c_uint8),   # variant 指针 (传空)
+        ctypes.POINTER(ctypes.c_uint8),   # key 输出缓冲区指针
+        ctypes.c_uint32,                   # key 缓冲区最大长度
+        ctypes.POINTER(ctypes.c_uint32),  # 实际 key 长度 (输出)
+    ],
+    'restype': ctypes.c_uint32,
+    'arg_map': ['seed', 'seed_len', 'level', 'variant', 'key', 'key_max', 'key_len_out'],
+    'key_buffer_size': 16,
+}
+
 EXCEL_PLAN_PATH = r"E:\Edownload\input\CAN测试用例_0x711_19条.xlsx"  # ★ Excel配置文件路径
 OUTPUT_DIR = r"E:\Edownload\input\output"                          # ★ 结果输出目录
 LISTENER_LOG_DIR = r"E:\Edownload\ouput"               # ★ 监听日志目录
@@ -83,8 +106,6 @@ SERVICE22_EXPANSION_STEPS = [
 # ────────────────────────────────────────────────
 # ★ VW安全访问流程参数（Excel触发值：KEY）
 SERVICE27_CONFIG = {
-    'session_request': '1003',        # ★ 切换会话请求（默认扩展会话）
-    'session_expected': '50 03',      # ★ 会话期望响应
     'seed_request': '2701',           # ★ 请求种子
     'seed_expected_sid': 0x67,        # ★ 种子响应SID
     'seed_expected_sub': 0x01,        # ★ 种子响应子功能
@@ -95,14 +116,22 @@ SERVICE27_CONFIG = {
 
 # ★ VW安全访问流程参数（Excel触发值：KEY1）
 SERVICE27_CONFIG_1 = {
-    'session_request': '1002',        # ★ 切换会话请求（刷新会话）
-    'session_expected': '50 02',      # ★ 会话期望响应
     'seed_request': '2705',           # ★ 请求种子
     'seed_expected_sid': 0x67,        # ★ 种子响应SID
     'seed_expected_sub': 0x05,        # ★ 种子响应子功能
     'key_request': '2706',            # ★ 发送密钥请求
     'key_expected_sid': 0x67,         # ★ 密钥验证成功SID
     'key_expected_sub': 0x06,         # ★ 密钥验证成功子功能
+}
+
+# ★ VW安全访问流程参数（Excel触发值：KEY3）
+SERVICE27_CONFIG_3 = {
+    'seed_request': '2703',           # ★ 请求种子
+    'seed_expected_sid': 0x67,        # ★ 种子响应SID
+    'seed_expected_sub': 0x03,        # ★ 种子响应子功能
+    'key_request': '2704',            # ★ 发送密钥请求
+    'key_expected_sid': 0x67,         # ★ 密钥验证成功SID
+    'key_expected_sub': 0x04,         # ★ 密钥验证成功子功能
 }
 
 # ────────────────────────────────────────────────

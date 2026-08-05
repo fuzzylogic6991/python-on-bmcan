@@ -1378,53 +1378,34 @@ class Service27Handler(UDSServiceHandler):
         response_str = ""
         success = False
 
-        # ★ 使用构造时传入的配置参数
-        session_req = svc_cfg.get('session_request', '1003')
-        session_sid = int(session_req[:2], 16) + 0x40  # 10 → 50
-        session_sub = int(session_req[2:4], 16)  # 03 或 02
-        skip_session = svc_cfg.get('skip_session', False)
+        # ═══ 步骤1：请求种子 ═══
+        seed_req = svc_cfg['seed_request']  # 如 "2701" 或 "2705"
+        self._send(bus, arb_id, [0x02, int(seed_req[:2], 16), int(seed_req[2:4], 16)], logger)
+        time.sleep(0.2)
 
-        # ═══ 步骤0：切换会话（可跳过） ═══
-        session_ok = True
-        if not skip_session:
-            self._send(bus, arb_id, [0x02, int(session_req[:2], 16), int(session_req[2:4], 16)], logger)
+        # ═══ 步骤2：获取种子 ═══
+        seed, seed_error = self._wait_seed(bus, logger, response_id,
+                               svc_cfg['seed_expected_sid'],
+                               svc_cfg['seed_expected_sub'])
+
+        if seed is not None:
+
+            # ═══ 步骤3：计算密钥 ═══
+            sec_level = svc_cfg['seed_expected_sub']  # 0x01/0x05 → 安全等级1/5
+            key = VW_Seed2Key(seed, sec_level)
+
+            # ═══ 步骤4：发送密钥 ═══
+            key_req = svc_cfg['key_request']  # 如 "2702" 或 "2706"
+            key_data = [0x02 + len(key), int(key_req[:2], 16), int(key_req[2:4], 16)] + list(key)
+            self._send(bus, arb_id, key_data, logger)
             time.sleep(0.2)
-            session_ok = self._wait_positive(bus, logger, response_id, session_sid, session_sub)
 
-        if session_ok:
-            time.sleep(0.1)
-
-            # ═══ 步骤1：请求种子 ═══
-            seed_req = svc_cfg['seed_request']  # 如 "2701" 或 "2705"
-            self._send(bus, arb_id, [0x02, int(seed_req[:2], 16), int(seed_req[2:4], 16)], logger)
-            time.sleep(0.2)
-
-            # ═══ 步骤2：获取种子 ═══
-            seed, seed_error = self._wait_seed(bus, logger, response_id,
-                                   svc_cfg['seed_expected_sid'],
-                                   svc_cfg['seed_expected_sub'])
-
-            if seed is not None:
-
-                # ═══ 步骤3：计算密钥 ═══
-                sec_level = svc_cfg['seed_expected_sub']  # 0x01/0x05 → 安全等级1/5
-                key = VW_Seed2Key(seed, sec_level)
-
-                # ═══ 步骤4：发送密钥 ═══
-                key_req = svc_cfg['key_request']  # 如 "2702" 或 "2706"
-                # 自适应帧格式: PCI=SID+Sub+key_len, 不再硬编码 +[0xCC]
-                key_data = [0x02 + len(key), int(key_req[:2], 16), int(key_req[2:4], 16)] + list(key)
-                self._send(bus, arb_id, key_data, logger)
-                time.sleep(0.2)
-
-                # ═══ 步骤5：等待结果 ═══
-                success, response_str = self._wait_key_result(bus, logger, response_id,
-                                                              svc_cfg['key_expected_sid'],
-                                                              svc_cfg['key_expected_sub'])
-            else:
-                response_str = f"获取种子失败 ({seed_error})"
+            # ═══ 步骤5：等待结果 ═══
+            success, response_str = self._wait_key_result(bus, logger, response_id,
+                                                          svc_cfg['key_expected_sid'],
+                                                          svc_cfg['key_expected_sub'])
         else:
-            response_str = f"{session_req} 切换失败"
+            response_str = f"获取种子失败 ({seed_error})"
 
         # ═══ 记录结果 ═══
         result_key = (test_id, test_name)
@@ -1457,21 +1438,6 @@ class Service27Handler(UDSServiceHandler):
         with BUS_SEND_LOCK:
             bus.send(msg)
         logger.log_sent_message(msg, time.time())
-
-    def _wait_positive(self, bus, logger, resp_id, sid, sub) -> bool:
-        """等待肯定响应"""
-        start = time.time()
-        while time.time() - start < 1.0:
-            msg = bus.recv(timeout=0.1)
-            if msg:
-                logger.log_received_message(msg, time.time())
-                if msg.arbitration_id == resp_id:
-                    data = list(msg.data)
-                    if len(data) >= 3 and data[1] == sid and data[2] == sub:
-                        return True
-                    elif data[1] == 0x7F:
-                        return False
-        return False
 
     def _wait_seed(self, bus, logger, resp_id, expected_sid, expected_sub) -> Tuple[Optional[bytes], str]:
         """等待种子，返回 (seed_bytes, error_info)
@@ -1703,9 +1669,10 @@ class TesterPresentHandler(UDSServiceHandler):
         response_id = config.get('security_response_id', 0x719)
         timeout = config.get('response_timeout', 2.0)
 
-        # 构造临时 cfg，复用基类 send 发送 3E 00
+        # 构造临时 cfg，复用基类 send 发送 3E xx
         try:
-            fake_cfg = {'request_data_str': '3E 00'}
+            payload = config.get('tp3e_payload', '3E 00')
+            fake_cfg = {'request_data_str': payload}
             self.send(bus, request_id, fake_cfg, logger)
         except Exception as e:
             print(f"⚠ 3E00 发送失败: {e}")
